@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.3.0
+ * Roche 朋友圈插件 v0.4.0
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.4: 修复滚动/弹窗关闭/发圈崩溃；侧边栏改双击顶栏触发；char发圈合并主动评论；触发评论隐晦化
  * v0.3: 拟真大改 + 修复发布失败/头像遮挡/文字图/局部loading/会话过滤/退出
  */
 (function () {
@@ -287,24 +288,85 @@
   function generateCharPost(space, sc) {
     var c = findChar(sc.charId) || {};
     var persona = c.persona || c.bio || sc.charPersona || '';
+    var myName = sc.charHandle || sc.charName;
     return loadMountedMemory(sc).then(function (mem) {
-      var sys = '你是「' + sc.charName + '」，现在要发一条你自己的微信朋友圈。\n';
+      // 抽取本空间最近 10 条动态 + 评论，作为 char 看到的朋友圈上下文
+      var recent = (state.posts || []).filter(function (p) { return p.spaceId === space.id; }).slice(0, 10);
+      var ctx = recent.map(function (p) {
+        var author = p.authorHandle || p.authorName;
+        var s = '【' + author + ' 的朋友圈】' + (p.text || '(仅图片)');
+        if (p.comments && p.comments.length) {
+          s += '\n  评论：' + p.comments.map(function (cm) {
+            return (cm.authorHandle || cm.authorName) + (cm.replyToName ? ' 回复 ' + cm.replyToName : '') + '：' + cm.text;
+          }).join('；');
+        }
+        return s;
+      }).join('\n\n');
+      var sys = '你是「' + sc.charName + '」，此刻正在刷微信朋友圈。\n';
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
-      if (mem) sys += '\n你最近的记忆与对话上下文：\n' + mem + '\n';
-      sys += '\n当前你身处的朋友圈空间，user 人设是「' + (space.userPersonaHandle || space.userPersonaName) + '」。\n';
-      sys += '\n要求：\n1. 用第一人称「我」发朋友圈，符合你的人设口吻\n2. 内容真实自然，1-3 句话\n3. 想配图用 <images><img>图片描述</img></images>，0~3 张文字图\n4. 正文放 <text>这里</text>\n5. 不要 emoji/hashtag/@\n6. 只输出 <text> 和可选 <images>';
-      return callAI({ messages: [{ role: 'system', content: sys }, { role: 'user', content: '发一条你的朋友圈吧。' }], temperature: 0.9 });
+      if (mem) sys += '\n你最近的记忆与对话上下文（来自 Roche 聊天）：\n' + mem + '\n';
+      sys += '\n朋友圈空间主人 user 是「' + (space.userPersonaHandle || space.userPersonaName) + '」。\n';
+      if (ctx) sys += '\n你刚刚滑到的朋友圈动态和评论：\n' + ctx + '\n';
+      sys += '\n现在请你做两件事：\n';
+      sys += '1. 发一条属于你自己的朋友圈\n';
+      sys += '2. 根据你的兴趣和性格，从上面动态里挑 0-3 条去评论；也可以评论你自己刚发的那条\n';
+      sys += '\n严格按以下格式输出，不要多余内容：\n';
+      sys += '<post>你的朋友圈正文</post>\n';
+      sys += '<post-images><img>图片1描述</img><img>图片2描述</img></post-images>   （可选，0-3 张文字图，没有就省略整段）\n';
+      sys += '<comment target="对方名字">你的评论</comment>   （可重复多行，target 填要评论的那条动态的作者名；评论自己刚发的就填 "' + myName + '"）\n';
+      sys += '\n要求：第一人称「我」，符合人设口吻，简短自然，不要 emoji/@/话题标签。';
+      return callAI({ messages: [{ role: 'system', content: sys }, { role: 'user', content: '发朋友圈，并评论你感兴趣的动态。' }], temperature: 0.9 });
     }).then(function (raw) {
-      var parsed = parsePostContent(raw);
-      if (!parsed.text && !parsed.images.length) parsed.text = trim((raw || '').replace(/<[^>]+>/g, '')) || '今天，又是普通的一天。';
+      // 解析 <post>
+      var postText = '';
+      var pm = raw.match(/<post>([\s\S]*?)<\/post>/i);
+      if (pm) postText = trim(pm[1]);
+      else postText = trim((raw || '').replace(/<comment[\s\S]*?<\/comment>/gi, '').replace(/<[^>]+>/g, '')) || '今天，又是普通的一天。';
+      // 解析 <post-images>
+      var images = [];
+      var pim = raw.match(/<post-images?>([\s\S]*?)<\/post-images?>/i);
+      if (pim) {
+        var re = /<img>([\s\S]*?)<\/img>/gi; var m;
+        while ((m = re.exec(pim[1]))) { var v = trim(m[1]); if (v) images.push({ type: 'text', value: v, textContent: v }); }
+      }
       var post = {
         id: uuid(), spaceId: space.id, authorType: 'char', authorId: sc.charId,
         authorName: sc.charName, authorHandle: sc.charHandle || sc.charName, authorAvatar: sc.charAvatar,
-        text: parsed.text, images: parsed.images, location: '', createdAt: Date.now(), likes: [], comments: []
+        text: postText, images: images, location: '', createdAt: Date.now(), likes: [], comments: []
       };
       return Store.addPost(post).then(function () {
-        Store.addNotif({ id: uuid(), spaceId: space.id, type: 'post', fromId: sc.charId, fromName: sc.charHandle || sc.charName, fromAvatar: sc.charAvatar, postId: post.id, postSnippet: parsed.text.slice(0, 30), text: '发布了新朋友圈', createdAt: Date.now(), read: false });
+        Store.addNotif({ id: uuid(), spaceId: space.id, type: 'post', fromId: sc.charId, fromName: sc.charHandle || sc.charName, fromAvatar: sc.charAvatar, postId: post.id, postSnippet: postText.slice(0, 30), text: '发布了新朋友圈', createdAt: Date.now(), read: false });
         return post;
+      }).then(function (savedPost) {
+        // 解析 <comment target=""> 并逐条保存到对应动态
+        var commentRe = /<comment\s+target="([^"]*)">([\s\S]*?)<\/comment>/gi;
+        var cm; var cmChain = Promise.resolve();
+        while ((cm = commentRe.exec(raw))) {
+          (function (targetName, cmText) {
+            cmChain = cmChain.then(function () {
+              var tName = trim(targetName); var cText = trim(cmText);
+              if (!cText) return;
+              // 在空间内找作者名匹配的动态；target=自己名字则评论刚发的那条
+              var target = null;
+              if (tName === myName || tName === sc.charName) target = savedPost;
+              else {
+                var candidates = state.posts.filter(function (p) { return p.spaceId === space.id; });
+                for (var i = 0; i < candidates.length; i++) {
+                  var aName = candidates[i].authorHandle || candidates[i].authorName;
+                  if (aName === tName) { target = candidates[i]; break; }
+                }
+              }
+              if (!target) return;
+              var comment = { id: uuid(), postId: target.id, authorType: 'char', authorId: sc.charId, authorName: sc.charName, authorHandle: sc.charHandle || sc.charName, text: cText, replyTo: null, replyToName: null, createdAt: Date.now() };
+              return Store.addComment(target.id, comment).then(function () {
+                if (target.id !== savedPost.id) {
+                  Store.addNotif({ id: uuid(), spaceId: space.id, type: 'comment', fromId: sc.charId, fromName: sc.charHandle || sc.charName, fromAvatar: sc.charAvatar, postId: target.id, postSnippet: (target.text || '').slice(0, 30), text: '评论：' + cText, createdAt: Date.now(), read: false });
+                }
+              });
+            });
+          })(cm[1], cm[2]);
+        }
+        return cmChain.then(function () { return savedPost; });
       });
     });
   }
@@ -478,9 +540,8 @@
             sc.nextPostAt = now + randomInterval(sc.postIntervalMin || 30);
             tasks.push(function () {
               return Store.saveSpaces().then(function () {
-                return generateCharPost(space, sc).then(function (post) {
-                  return generateAutoComments(space, post, sc.autoCommentCount || DEFAULT_AUTO_COMMENT).then(function () { if (root) render(); });
-                }).catch(function (e) { console.warn('[Moments] 后台生成失败', e); });
+                // char 发圈自带主动评论，不再触发其他 char 评论
+                return generateCharPost(space, sc).then(function () { if (root) render(); }).catch(function (e) { console.warn('[Moments] 后台生成失败', e); });
               });
             });
           }
@@ -504,12 +565,18 @@
       root.innerHTML = '<div class="' + ROOT_CLASS + '"><div class="moments-boot"><div class="moments-spin">' + WINDMILL_SVG + '</div><div class="moments-boot-text">加载中...</div></div></div>';
       return;
     }
+    // 保存滚动位置，避免重渲染跳顶
+    var prevScroll = root.querySelector('.moments-scroll');
+    var savedScroll = prevScroll ? prevScroll.scrollTop : 0;
     var space = Store.getActiveSpace();
     var html = '<div class="' + ROOT_CLASS + '">';
+    // 滚动区：顶栏 sticky + 封面 + feed
+    html += '<div class="moments-scroll">';
     html += renderTopbar(space);
     html += renderCover(space);
     html += renderFeed(space);
-    // 浮层
+    html += '</div>';
+    // 浮层（与滚动区同级，覆盖整个 root）
     if (state.sidebarOpen) html += renderSidebar(space);
     if (state.postModalOpen) html += renderPostModal(space);
     if (state.notifPanelOpen) html += renderNotifPanel(space);
@@ -520,6 +587,12 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
+    // 恢复滚动位置
+    if (savedScroll && !state._suppressScrollRestore) {
+      var newScroll = root.querySelector('.moments-scroll');
+      if (newScroll) newScroll.scrollTop = savedScroll;
+    }
+    state._suppressScrollRestore = false;
     if (state.postModalOpen) setupPostModalTools();
   }
 
@@ -528,7 +601,7 @@
     var unread = 0; state.notifs.forEach(function (n) { if (!n.read) unread++; });
     return '<div class="moments-topbar">' +
       '<div class="moments-tb-left" data-action="back">' + ICON.back + '</div>' +
-      '<div class="moments-tb-title">朋友圈</div>' +
+      '<div class="moments-tb-title" data-dbl="open-sidebar" title="双击打开设置">朋友圈</div>' +
       '<div class="moments-tb-right">' +
         '<span class="moments-tb-icon" data-action="open-post-modal">' + ICON.camera + '</span>' +
         '<span class="moments-tb-icon moments-tb-bell' + (unread ? ' has-dot' : '') + '" data-action="open-notif">' + ICON.bell + (unread ? '<i class="moments-dot"></i>' : '') + '</span>' +
@@ -756,6 +829,7 @@
   function bindEvents() {
     if (!root) return;
     root.addEventListener('click', onRootClick);
+    root.addEventListener('dblclick', onRootDblClick);
     root.addEventListener('change', onRootChange);
   }
   function closestEl(el, attr, val) {
@@ -767,15 +841,28 @@
     return null;
   }
   function did(el, attr) { var n = closestEl(el, attr); return n ? n.getAttribute(attr) : null; }
+  // 双击：仅顶栏标题触发侧边栏
+  function onRootDblClick(e) {
+    var t = e.target;
+    var dblEl = closestEl(t, 'data-dbl');
+    if (!dblEl) return;
+    var dbl = dblEl.getAttribute('data-dbl');
+    if (dbl === 'open-sidebar') { state.sidebarOpen = true; render(); }
+  }
   function onRootClick(e) {
     var t = e.target;
     // 文字图点击：直接 toggle class，不 render
     var textToggle = closestEl(t, 'data-action', 'toggle-text');
     if (textToggle) { textToggle.classList.toggle('revealed'); return; }
-    var act = closestEl(t, 'data-action');
-    if (!act) return;
-    var action = act.getAttribute('data-action');
-    handleAction(action, t, e);
+    // 遍历至 root：若中途遇到 data-stop="1" 则阻止冒泡到 mask 的关闭动作
+    // 但若先遇到 data-action，则正常触发（modal 内部按钮自身带 data-action）
+    var el = t;
+    while (el && el !== root) {
+      if (el.getAttribute && el.getAttribute('data-stop') === '1') return;
+      var a = el.getAttribute && el.getAttribute('data-action');
+      if (a != null) { handleAction(a, t, e); return; }
+      el = el.parentNode;
+    }
   }
   function onRootChange(e) {
     var t = e.target; var field = t.getAttribute && t.getAttribute('data-field'); if (!field) return;
@@ -828,8 +915,8 @@
       }
       case 'char-post-now': {
         var cid7 = did(t, 'data-cid'); if (!space) break; var sc7 = getSpaceChar(space, cid7); if (!sc7) break;
-        setTip((sc7.charHandle || sc7.charName) + ' 正在发朋友圈...');
-        generateCharPost(space, sc7).then(function (post) { return generateAutoComments(space, post, sc7.autoCommentCount || DEFAULT_AUTO_COMMENT); }).then(function () { setTip(null); toast('已发布'); }).catch(function (err) { setTip(null); toast('发布失败：' + (err && err.message || '')); });
+        setTip((sc7.charHandle || sc7.charName) + ' 正在发朋友圈并评论...');
+        generateCharPost(space, sc7).then(function () { setTip(null); toast('已发布'); if (root) render(); }).catch(function (err) { setTip(null); toast('发布失败：' + (err && err.message || '')); });
         break;
       }
       case 'sync-trace':
@@ -847,14 +934,32 @@
         var inp3 = $('#moments-cm-text', root); if (!inp3) break; var text = trim(inp3.value); if (!text || !state.commentTarget) break;
         var subj2 = getCurrentSubject(); if (!subj2) break; var ct = state.commentTarget;
         var comment = { id: uuid(), postId: ct.postId, authorType: subj2.type, authorId: subj2.id, authorName: subj2.realName || subj2.name, authorHandle: subj2.name, text: text, replyTo: ct.replyTo, replyToName: ct.replyToName, createdAt: Date.now() };
-        Store.addComment(ct.postId, comment).then(function () { state.commentTarget = null; render(); });
+        Store.addComment(ct.postId, comment).then(function () {
+          state.commentTarget = null; render();
+          // user 评论后，召唤其他 char 来回应（user 行为触发评论）
+          if (space) {
+            var post9 = null; for (var r = 0; r < state.posts.length; r++) if (state.posts[r].id === ct.postId) { post9 = state.posts[r]; break; }
+            if (post9) {
+              setTip('char 正在看这条动态...');
+              generateAutoComments(space, post9, DEFAULT_AUTO_COMMENT).then(function () { setTip(null); if (root) render(); }).catch(function () { setTip(null); });
+            }
+          }
+        });
         break;
       }
       case 'open-acts': {
         var pid5 = did(t, 'data-id');
-        // 弹出点赞/评论气泡
+        // 弹出点赞/评论/召唤 气泡（召唤为隐晦的触发评论入口）
         var pop = $('.moment-act-pop[data-id="' + pid5 + '"]', root);
-        if (pop) { pop.classList.toggle('open'); pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div>'; }
+        if (pop) { pop.classList.toggle('open'); pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div><div class="moment-act-pop-i subtle" data-action="summon-comments" data-id="' + pid5 + '">' + ICON.more + '召唤</div>'; }
+        break;
+      }
+      case 'summon-comments': {
+        var pidS = did(t, 'data-id'); if (!space) break;
+        var postS = null; for (var s = 0; s < state.posts.length; s++) if (state.posts[s].id === pidS) { postS = state.posts[s]; break; }
+        if (!postS) break;
+        setTip('召唤 char 评论中...');
+        generateAutoComments(space, postS, DEFAULT_AUTO_COMMENT).then(function () { setTip(null); toast('评论已生成'); if (root) render(); }).catch(function () { setTip(null); });
         break;
       }
       case 'view-photo': { /* URL/本地图直接显示，无需操作 */ break; }
@@ -948,15 +1053,17 @@
   var CSS = ''
 + '.' + ROOT_CLASS + '{position:absolute;inset:0;background:#EDEDED;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#353535;font-size:14px;line-height:1.5;}'
 + '.' + ROOT_CLASS + ' *{box-sizing:border-box;}'
-// 顶栏 黑底白字
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:absolute;top:0;left:0;right:0;z-index:20;height:44px;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;}'
+// 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动
++ '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}'
+// 顶栏 黑底白字 sticky
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;height:44px;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;flex-shrink:0;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{width:40px;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-title{flex:1;text-align:center;font-size:17px;font-weight:500;}'
++ '.' + ROOT_CLASS + ' .moments-tb-title{flex:1;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{display:flex;align-items:center;gap:2px;}'
 + '.' + ROOT_CLASS + ' .moments-tb-icon{width:40px;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative;}'
 + '.' + ROOT_CLASS + ' .moments-dot{position:absolute;top:7px;right:8px;width:8px;height:8px;background:#FA5151;border-radius:50%;border:1.5px solid #1F1F1F;}'
 // 封面
-+ '.' + ROOT_CLASS + ' .moments-cover-wrap{position:relative;width:100%;height:270px;background:#333;margin-top:44px;}'
++ '.' + ROOT_CLASS + ' .moments-cover-wrap{position:relative;width:100%;height:270px;background:#333;}'
 + '.' + ROOT_CLASS + ' .moments-cover{position:absolute;inset:0;background-size:cover;background-position:center;background-color:#576B95;cursor:pointer;overflow:hidden;}'
 + '.' + ROOT_CLASS + ' .moments-cover-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.55);font-size:13px;}'
 + '.' + ROOT_CLASS + ' .moments-cover-bar{position:absolute;left:0;right:0;bottom:-34px;display:flex;align-items:flex-end;justify-content:flex-end;gap:14px;padding:0 16px;z-index:2;}'
@@ -968,7 +1075,7 @@
 + '.' + ROOT_CLASS + ' .moments-avatar-fb{width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#576B95;color:#fff;font-size:22px;font-weight:600;}'
 + '.' + ROOT_CLASS + ' .moments-avatar.sm .moments-avatar-fb{font-size:16px;}'
 // feed
-+ '.' + ROOT_CLASS + ' .moments-feed{padding:50px 0 30px 0;background:#EDEDED;min-height:calc(100% - 314px);}'
++ '.' + ROOT_CLASS + ' .moments-feed{padding:46px 0 30px 0;background:#EDEDED;}'
 + '.' + ROOT_CLASS + ' .moment{background:#fff;padding:14px 16px;border-bottom:1px solid #f0f0f0;}'
 + '.' + ROOT_CLASS + ' .moment-hd{display:flex;align-items:flex-start;}'
 + '.' + ROOT_CLASS + ' .moment-avatar{width:42px;height:42px;border-radius:6px;overflow:hidden;background:#ddd;flex-shrink:0;margin-right:10px;}'
@@ -999,6 +1106,7 @@
 + '.' + ROOT_CLASS + ' .moment-act-pop.open{position:absolute;right:30px;top:-6px;background:#4c4c4c;border-radius:6px;display:flex;z-index:5;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop.open::after{content:"";position:absolute;right:-6px;top:10px;border:6px solid transparent;border-left-color:#4c4c4c;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop-i{display:flex;align-items:center;gap:4px;color:#fff;font-size:13px;padding:8px 14px;cursor:pointer;}'
++ '.' + ROOT_CLASS + ' .moment-act-pop-i.subtle{color:rgba(255,255,255,0.6);font-size:12px;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop-i:not(:last-child){border-right:1px solid rgba(255,255,255,0.2);}'
 // 互动区
 + '.' + ROOT_CLASS + ' .moment-int{background:#f7f7f7;border-radius:4px;padding:6px 10px;margin-top:6px;position:relative;}'
@@ -1130,7 +1238,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.3.0',
+    version: '0.4.0',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -1175,6 +1283,7 @@
         } catch (e) { console.warn('[Moments] auto sync failed', e); }
         if (root) {
           root.removeEventListener('click', onRootClick);
+          root.removeEventListener('dblclick', onRootDblClick);
           root.removeEventListener('change', onRootChange);
         }
         pendingImages = [];
