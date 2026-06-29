@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.5.0
+ * Roche 朋友圈插件 v0.6.0
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.6: 记忆/上下文加时间标签；氛围提示词（发圈/评论/NPC）；per-char NPC 系统（手动+AI生成）；buildActionSummary 4 分类修复人称矛盾
  * v0.5: char多评论+@提及；user@触发必定评论；"··"气泡定位修复+外部点击关闭；切换空间/主体抑制跳顶
  * v0.4: 修复滚动/弹窗关闭/发圈崩溃；侧边栏改双击顶栏触发；char发圈合并主动评论；触发评论隐晦化
  * v0.3: 拟真大改 + 修复发布失败/头像遮挡/文字图/局部loading/会话过滤/退出
@@ -23,6 +24,7 @@
   var SYNC_PREFIX = '[RocheMomentsSync';
   var MAX_AUTO_COMMENT = 8;
   var DEFAULT_AUTO_COMMENT = 2;
+  var NPC_COMMENT_PROBABILITY = 0.6;
 
   // ========== 风车 SVG ==========
   function petal(deg, color) {
@@ -72,6 +74,11 @@
     if (d.getFullYear() === today.getFullYear()) return (d.getMonth() + 1) + '月' + d.getDate() + '日';
     return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日';
   }
+  // 紧凑时间戳：MM-DD HH:MM（用于记忆轨迹与 AI 上下文时间标签）
+  function formatStamp(ts) {
+    var d = new Date(ts);
+    return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
   function randomInterval(baseMin) {
     var base = baseMin * 60 * 1000;
     return Math.round(base + base * JITTER * (Math.random() * 2 - 1));
@@ -91,6 +98,7 @@
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
     charListOpen: false, commentTarget: null,
+    moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     tip: null,            // 局部 loading 提示 {text}
     bootLoading: true,    // 首次加载全屏
     allChars: [], allPersonas: [], activePersona: null
@@ -109,6 +117,7 @@
         state.spaces = r[0] || []; state.posts = r[1] || []; state.notifs = r[2] || [];
         state.subapi = r[3] || []; state.syncstate = r[4] || []; state.activeSpaceId = r[5];
         if (!state.activeSpaceId && state.spaces.length) state.activeSpaceId = state.spaces[0].id;
+        normalizeSpaces();
       });
     },
     saveSpaces: function () { return Store._set(KEYS.SPACES, state.spaces); },
@@ -135,7 +144,7 @@
         var p = state.posts[i]; if (!p.likes) p.likes = [];
         var idx = -1;
         for (var j = 0; j < p.likes.length; j++) if (p.likes[j].id === who.id) { idx = j; break; }
-        if (idx >= 0) p.likes.splice(idx, 1); else p.likes.push(who);
+        if (idx >= 0) p.likes.splice(idx, 1); else p.likes.push({ id: who.id, name: who.name, ts: Date.now() });
         break;
       }
       return Store.savePosts();
@@ -211,7 +220,8 @@
       id: 'sp_' + per.id + '_' + Date.now().toString(36),
       userPersonaId: per.id, userPersonaName: per.name || per.id,
       userPersonaHandle: per.handle || per.name || '', userPersonaAvatar: per.avatar || '',
-      userPersonaBio: per.bio || '', cover: '', chars: [], createdAt: Date.now()
+      userPersonaBio: per.bio || '', cover: '', chars: [], createdAt: Date.now(),
+      customPrompts: { charPost: '', charComment: '', npcComment: '' }
     };
     state.spaces.push(sp); Store.saveSpaces(); return sp;
   }
@@ -222,13 +232,43 @@
       charId: c.id, charName: c.name || c.id, charHandle: c.handle || c.name || '',
       charAvatar: c.avatar || '', charPersona: c.persona || c.bio || '', charBio: c.bio || '',
       enabled: true, memoryMounts: [], nextPostAt: 0, postIntervalMin: 30,
-      autoCommentCount: DEFAULT_AUTO_COMMENT, lastSyncAt: 0
+      autoCommentCount: DEFAULT_AUTO_COMMENT, lastSyncAt: 0, npcs: []
     });
     Store.saveSpaces();
   }
   function unbindCharFromSpace(space, cid) {
     space.chars = space.chars.filter(function (c) { return c.charId !== cid; });
     Store.saveSpaces();
+  }
+  // 氛围提示词读取（防御旧数据）
+  function getSpacePrompts(space) {
+    if (!space || !space.customPrompts) return { charPost: '', charComment: '', npcComment: '' };
+    var cp = space.customPrompts || {};
+    return { charPost: cp.charPost || '', charComment: cp.charComment || '', npcComment: cp.npcComment || '' };
+  }
+  // char 的 NPC 列表读取（防御旧数据）
+  function getCharNpcs(sc) {
+    if (!sc || !sc.npcs) return [];
+    return sc.npcs || [];
+  }
+  // 旧数据兼容：补 customPrompts / npcs 字段
+  function normalizeSpaces() {
+    var dirty = false;
+    (state.spaces || []).forEach(function (space) {
+      if (!space.customPrompts || typeof space.customPrompts !== 'object') {
+        space.customPrompts = { charPost: '', charComment: '', npcComment: '' };
+        dirty = true;
+      } else {
+        var cp = space.customPrompts;
+        if (cp.charPost == null) { cp.charPost = ''; dirty = true; }
+        if (cp.charComment == null) { cp.charComment = ''; dirty = true; }
+        if (cp.npcComment == null) { cp.npcComment = ''; dirty = true; }
+      }
+      (space.chars || []).forEach(function (sc) {
+        if (!sc.npcs || !Array.isArray(sc.npcs)) { sc.npcs = []; dirty = true; }
+      });
+    });
+    if (dirty) Store.saveSpaces();
   }
 
   // ========== 记忆加载（过滤防循环）==========
@@ -295,10 +335,10 @@
       var recent = (state.posts || []).filter(function (p) { return p.spaceId === space.id; }).slice(0, 10);
       var ctx = recent.map(function (p) {
         var author = p.authorHandle || p.authorName;
-        var s = '【' + author + ' 的朋友圈】' + (p.text || '(仅图片)');
+        var s = '【' + author + ' 的朋友圈 · ' + formatStamp(p.createdAt) + '】' + (p.text || '(仅图片)');
         if (p.comments && p.comments.length) {
           s += '\n  评论：' + p.comments.map(function (cm) {
-            return (cm.authorHandle || cm.authorName) + (cm.replyToName ? ' 回复 ' + cm.replyToName : '') + '：' + cm.text;
+            return (cm.authorHandle || cm.authorName) + '（' + formatStamp(cm.createdAt) + '）' + (cm.replyToName ? ' 回复 ' + cm.replyToName : '') + '：' + cm.text;
           }).join('；');
         }
         return s;
@@ -307,6 +347,8 @@
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
       if (mem) sys += '\n你最近的记忆与对话上下文（来自 Roche 聊天）：\n' + mem + '\n';
       sys += '\n朋友圈空间主人 user 是「' + (space.userPersonaHandle || space.userPersonaName) + '」。\n';
+      var prompts = getSpacePrompts(space);
+      if (prompts.charPost) sys += '\n【发圈氛围提示（user 设定，请遵循）】' + prompts.charPost + '\n';
       if (ctx) sys += '\n你刚刚滑到的朋友圈动态和评论：\n' + ctx + '\n';
       // 可被 @ 的人名列表（user + 所有启用的 char）
       var mentionables = [];
@@ -372,7 +414,7 @@
             });
           })(cm[1], cm[2]);
         }
-        return cmChain.then(function () { return savedPost; });
+        return cmChain.then(function () { return triggerNpcComments(space, savedPost, sc); }).then(function () { return savedPost; });
       });
     });
   }
@@ -433,6 +475,8 @@
     return loadMountedMemory(sc).then(function (mem) {
       var sys = '你是「' + sc.charName + '」，正在看「' + (post.authorHandle || post.authorName) + '」的微信朋友圈。\n';
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
+      var prompts = getSpacePrompts(space);
+      if (prompts.charComment) sys += '\n【评论氛围提示（user 设定，请遵循）】' + prompts.charComment + '\n';
       if (mem) sys += '\n你最近的记忆上下文：\n' + mem + '\n';
       sys += '\n这条朋友圈内容：\n' + (post.text || '(仅图片)') + '\n';
       sys += post.authorType === 'user' ? '发朋友圈的是 user（' + (space.userPersonaHandle || space.userPersonaName) + '）。\n' : '发朋友圈的是 ' + (post.authorHandle || post.authorName) + '（和你一样是 char）。\n';
@@ -466,6 +510,67 @@
       if (!out.length) out.push({ id: uuid(), postId: post.id, authorType: 'char', authorId: sc.charId, authorName: sc.charName, authorHandle: sc.charHandle || sc.charName, text: '…', replyTo: (replyTarget && replyTarget.commentId) || null, replyToName: (replyTarget && replyTarget.name) || null, createdAt: Date.now() });
       return { comments: out, liked: p.liked, sc: sc };
     });
+  }
+  // NPC 评论生成（氛围组：NPC 是 char 的好友，只在 char 发圈时评论其动态，不挂 Roche 会话记忆）
+  function generateNpcComment(space, post, sc, npc, prevComments) {
+    var sys = '你是「' + npc.name + '」，「' + sc.charName + '」的好友，正在看「' + sc.charName + '」刚发的微信朋友圈。\n';
+    if (npc.bio) sys += '\n你的人设：\n' + npc.bio + '\n';
+    var prompts = getSpacePrompts(space);
+    if (prompts.npcComment) sys += '\n【评论氛围提示（user 设定，请遵循）】' + prompts.npcComment + '\n';
+    sys += '\n这条朋友圈内容：\n' + (post.text || '(仅图片)') + '\n';
+    sys += '发朋友圈的是你的好友「' + (sc.charHandle || sc.charName) + '」。\n';
+    if (prevComments && prevComments.length) {
+      sys += '\n已有评论（你可以看到）：\n';
+      prevComments.forEach(function (pc) { sys += '- ' + (pc.authorHandle || pc.authorName) + '：' + pc.text + (pc.replyToName ? ' （回复 ' + pc.replyToName + '）' : '') + '\n'; });
+    }
+    sys += '\n请以你的身份评论这条朋友圈。写 1 条，简短自然。\n';
+    sys += '\n输出格式（严格遵守，不要多余内容）：\n';
+    sys += '<comment>评论正文</comment>\n';
+    sys += '<like>1</like> 或 <like>0</like>   （放末尾，1 表示顺便点赞，0 表示不点）\n';
+    sys += '\n要求：第一人称「我」，符合人设口吻，1-2 句，不要 emoji/话题标签。';
+    return callAI({ messages: [{ role: 'system', content: sys }, { role: 'user', content: '写评论。' }], temperature: 0.9 }).then(function (raw) {
+      var p = parseCommentResponse(raw);
+      var out = [];
+      (p.comments || []).forEach(function (pc) {
+        out.push({
+          id: uuid(), postId: post.id, authorType: 'npc', authorId: 'npc_' + npc.id,
+          authorName: npc.name, authorHandle: npc.handle,
+          text: pc.text, replyTo: null, replyToName: pc.replyToName || null, createdAt: Date.now()
+        });
+      });
+      if (!out.length) out.push({ id: uuid(), postId: post.id, authorType: 'npc', authorId: 'npc_' + npc.id, authorName: npc.name, authorHandle: npc.handle, text: '…', replyTo: null, replyToName: null, createdAt: Date.now() });
+      return { comments: out, liked: p.liked, npc: npc };
+    });
+  }
+  // 触发 NPC 评论：只在 char 发圈后调用，每个 NPC 按 NPC_COMMENT_PROBABILITY 概率评论
+  function triggerNpcComments(space, post, sc) {
+    var npcs = getCharNpcs(sc);
+    if (!npcs.length) return Promise.resolve();
+    var prevComments = (post.comments || []).slice();
+    var chain = Promise.resolve();
+    npcs.forEach(function (npc) {
+      if (Math.random() >= NPC_COMMENT_PROBABILITY) return;
+      chain = chain.then(function () {
+        return generateNpcComment(space, post, sc, npc, prevComments).then(function (r) {
+          (r.comments || []).forEach(function (comment) { prevComments.push(comment); });
+          if (r.liked) {
+            var has = false;
+            for (var i = 0; i < post.likes.length; i++) if (post.likes[i].id === 'npc_' + npc.id) { has = true; break; }
+            if (!has) post.likes.push({ id: 'npc_' + npc.id, name: npc.handle || npc.name, ts: Date.now() });
+          }
+          var saveChain = Promise.resolve();
+          (r.comments || []).forEach(function (comment) {
+            saveChain = saveChain.then(function () {
+              return Store.addComment(post.id, comment).then(function () {
+                return Store.addNotif({ id: uuid(), spaceId: space.id, type: 'comment', fromId: 'npc_' + npc.id, fromName: npc.handle || npc.name, fromAvatar: npc.avatar || '', postId: post.id, postSnippet: (post.text || '').slice(0, 30), text: '评论：' + comment.text, createdAt: Date.now(), read: false });
+              });
+            });
+          });
+          return saveChain;
+        }).catch(function (e) { console.warn('[Moments] NPC 评论失败', npc.name, e); });
+      });
+    });
+    return chain.then(function () { return Store.savePosts(); });
   }
   // 容错：单个 char 失败不中断；forceCharIds 为必定参与评论的 char（user @触发）
   function generateAutoComments(space, post, count, forceCharIds) {
@@ -526,40 +631,77 @@
     });
   }
   function buildActionSummary(space, sc, sinceTs) {
-    var myPosts = [], myComments = [], myLikes = [];
+    var userHandle = space.userPersonaHandle || space.userPersonaName;
+    // 4 分类：①我发的朋友圈 ②我对自己朋友圈的互动 ③我对user朋友圈的互动 ④我对其他char朋友圈的互动
+    var myPosts = [], selfComments = [], selfLikes = [], userComments = [], userLikes = [], otherComments = [], otherLikes = [];
     state.posts.forEach(function (p) {
       if (p.spaceId !== space.id) return;
-      if (p.authorType === 'char' && p.authorId === sc.charId && p.createdAt > sinceTs) myPosts.push(p);
-      if (p.likes) for (var i = 0; i < p.likes.length; i++) if (p.likes[i].id === sc.charId && p.createdAt > sinceTs) {
-        myLikes.push({ ownerName: p.authorType === 'user' ? (space.userPersonaHandle || space.userPersonaName) : (p.authorHandle || p.authorName) });
-      }
+      if (p.createdAt <= sinceTs) return;
+      var isMyPost = p.authorType === 'char' && p.authorId === sc.charId;
+      var onName = p.authorType === 'user' ? userHandle : (p.authorHandle || p.authorName);
+      // ① 我发的朋友圈
+      if (isMyPost) myPosts.push(p);
+      // 评论归类
       if (p.comments) p.comments.forEach(function (c) {
-        if (c.authorType === 'char' && c.authorId === sc.charId && c.createdAt > sinceTs) {
-          myComments.push({ onName: p.authorType === 'user' ? (space.userPersonaHandle || space.userPersonaName) : (p.authorHandle || p.authorName), isMyPost: p.authorType === 'char' && p.authorId === sc.charId, replyToName: c.replyToName, text: c.text });
+        if (c.authorType !== 'char' || c.authorId !== sc.charId) return;
+        if (c.createdAt <= sinceTs) return;
+        var item = { ts: c.createdAt, replyToName: c.replyToName, text: c.text, onName: onName };
+        if (isMyPost) selfComments.push(item);
+        else if (p.authorType === 'user') userComments.push(item);
+        else otherComments.push(item);
+      });
+      // 点赞归类
+      if (p.likes) for (var i = 0; i < p.likes.length; i++) {
+        if (p.likes[i].id === sc.charId) {
+          var lItem = { ts: p.likes[i].ts || p.createdAt, onName: onName };
+          if (isMyPost) selfLikes.push(lItem);
+          else if (p.authorType === 'user') userLikes.push(lItem);
+          else otherLikes.push(lItem);
         }
-      });
+      }
     });
-    var dt = new Date();
-    var stamp = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0') + ' ' + String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
     var L = [];
-    L.push(SYNC_PREFIX + ' · 我的朋友圈行为记录 · ' + stamp + ']');
-    L.push(''); L.push('我刚在朋友圈做了这些事：'); L.push('');
-    if (myPosts.length) { L.push('【我发的朋友圈】'); myPosts.forEach(function (p, i) { L.push((i + 1) + '. "' + (p.text || '(仅图片)') + '"'); }); L.push(''); }
-    if (myComments.length) {
-      L.push('【我的评论】');
-      myComments.forEach(function (c) {
-        if (c.isMyPost && c.replyToName) L.push('- 我回复了 ' + c.replyToName + ' 在我朋友圈下的评论：' + c.text);
-        else if (c.replyToName) L.push('- 我回复了 ' + c.replyToName + ' 在 ' + c.onName + ' 朋友圈下的评论：' + c.text);
-        else L.push('- 我评论了 ' + c.onName + ' 的朋友圈：' + c.text);
-      });
+    L.push(SYNC_PREFIX + ' · 我的朋友圈行为记录 · ' + formatStamp(Date.now()) + ']');
+    L.push(''); L.push('我刚在朋友圈做了这些事（按时间标签排列）：'); L.push('');
+    // ① 我发的朋友圈
+    if (myPosts.length) {
+      L.push('【我发的朋友圈】');
+      myPosts.forEach(function (p) { L.push('- [' + formatStamp(p.createdAt) + '] ' + (p.text || '(仅图片)')); });
       L.push('');
     }
-    if (myLikes.length) {
-      L.push('【我的点赞】');
-      var names = myLikes.map(function (l) { return l.ownerName; }).filter(function (v, i, a) { return a.indexOf(v) === i; });
-      L.push('我给 ' + names.join('、') + ' 的朋友圈点了赞。'); L.push('');
+    // ② 我对自己朋友圈的互动（修复人称矛盾：不再写"我评论了自己名字的朋友圈"）
+    if (selfComments.length || selfLikes.length) {
+      L.push('【我对自己朋友圈的互动】');
+      selfComments.forEach(function (c) {
+        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了自己朋友圈下 ' + c.replyToName + ' 的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] 我在自己的朋友圈下留言：' + c.text);
+      });
+      selfLikes.forEach(function (l) { L.push('- [' + formatStamp(l.ts) + '] 我给自己的朋友圈点了赞'); });
+      L.push('');
     }
-    if (!myPosts.length && !myComments.length && !myLikes.length) { L.push('（这段时间我没有在朋友圈做任何事。）'); L.push(''); }
+    // ③ 我对 user 朋友圈的互动
+    if (userComments.length || userLikes.length) {
+      L.push('【我对 user（' + userHandle + '）朋友圈的互动】');
+      userComments.forEach(function (c) {
+        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 user 朋友圈下的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 user 的朋友圈：' + c.text);
+      });
+      userLikes.forEach(function (l) { L.push('- [' + formatStamp(l.ts) + '] 我给 user 的朋友圈点了赞'); });
+      L.push('');
+    }
+    // ④ 我对其他 char 朋友圈的互动
+    if (otherComments.length || otherLikes.length) {
+      L.push('【我对其他 char 朋友圈的互动】');
+      otherComments.forEach(function (c) {
+        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 ' + c.onName + ' 朋友圈下的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 ' + c.onName + ' 的朋友圈：' + c.text);
+      });
+      otherLikes.forEach(function (l) { L.push('- [' + formatStamp(l.ts) + '] 我给 ' + l.onName + ' 的朋友圈点了赞'); });
+      L.push('');
+    }
+    if (!myPosts.length && !selfComments.length && !selfLikes.length && !userComments.length && !userLikes.length && !otherComments.length && !otherLikes.length) {
+      L.push('（这段时间我没有在朋友圈做任何事。）'); L.push('');
+    }
     L.push('这是我的私人记忆记录，不必向 user 复述，但可以在对话中自然延续相关话题。');
     return L.join('\n');
   }
@@ -684,6 +826,8 @@
     if (state.memMountCharId) html += renderMemMountModal(space, state.memMountCharId);
     if (state.subApiPanelOpen) html += renderSubApiPanel();
     if (state.charListOpen) html += renderCharListModal(space);
+    if (state.moodPromptsOpen) html += renderMoodPromptsModal(space);
+    if (state.npcModalCharId) html += renderNpcModal(space, state.npcModalCharId);
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
@@ -821,6 +965,7 @@
         html += '<div class="moments-sb-btns">';
         html += '<span class="mm-btn" data-action="char-post-now" data-cid="' + escapeHtml(sc.charId) + '">发一条</span>';
         html += '<span class="mm-btn" data-action="open-mem-mount" data-cid="' + escapeHtml(sc.charId) + '">记忆</span>';
+        html += '<span class="mm-btn" data-action="open-npc-modal" data-cid="' + escapeHtml(sc.charId) + '">NPC</span>';
         html += '<span class="mm-btn" data-action="sync-trace" data-cid="' + escapeHtml(sc.charId) + '">同步</span>';
         html += '<span class="mm-btn danger" data-action="unbind-char" data-cid="' + escapeHtml(sc.charId) + '">解绑</span>';
         html += '</div></div>';
@@ -829,6 +974,7 @@
       html += '</div>';
     }
     html += '<div class="moments-sb-sec"><div class="moments-sb-label">设置</div>';
+    html += '<div class="moments-sb-item" data-action="open-mood-prompts"><div class="moments-sb-info"><div class="moments-sb-name">氛围提示词</div><div class="moments-sb-sub">自定义发圈/评论氛围</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-subapi"><div class="moments-sb-info"><div class="moments-sb-name">副 API 设置</div><div class="moments-sb-sub">' + (getActiveSubApi() ? getActiveSubApi().name : '默认 roche.ai.chat') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="clear-img-cache"><div class="moments-sb-info"><div class="moments-sb-name">清除本地图片缓存</div></div></div>';
     html += '</div></div>';
@@ -883,6 +1029,48 @@
     });
     html += '<div class="moments-div"></div><div class="moments-sec-title">新建预设</div>';
     html += '<div class="moments-form"><label>名称<input class="moments-input" id="moments-sa-name" placeholder="如 OpenAI / DeepSeek"></label><label>Base URL<input class="moments-input" id="moments-sa-url" placeholder="https://api.openai.com/v1"></label><label>API Key<input class="moments-input" id="moments-sa-key" type="password" placeholder="sk-..."></label><div class="moments-form-row"><label>模型<select class="moments-input" id="moments-sa-model"><option value="">先点刷新获取</option></select></label><button class="moments-btn ghost" data-action="refresh-models">刷新模型</button></div><button class="moments-btn" data-action="save-subapi">保存预设</button></div>';
+    return html + '</div></div></div>';
+  }
+
+  function renderMoodPromptsModal(space) {
+    var cp = getSpacePrompts(space);
+    var html = '<div class="moments-modal-mask" data-action="close-mood-prompts"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">朋友圈氛围提示词</div><div class="moments-modal-x" data-action="close-mood-prompts">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    html += '<div class="moments-hint">留空则不注入。只影响 AI 生成的氛围倾向，不改变输出格式。三栏分别对应：char 发朋友圈、char 评论、NPC 评论。</div>';
+    html += '<div class="moments-mood-label">char 发朋友圈</div>';
+    html += '<div class="moments-mood-hint">如：朋友圈少一点争吵，多一些日常分享 / 喜欢在朋友圈抬杠吐槽</div>';
+    html += '<textarea class="moments-mood-ta" data-field="mood-charPost" placeholder="留空=不注入">' + escapeHtml(cp.charPost) + '</textarea>';
+    html += '<div class="moments-mood-label">char 评论</div>';
+    html += '<div class="moments-mood-hint">如：char 评论时温和一些，少抬杠 / 评论尖锐一点更有性格</div>';
+    html += '<textarea class="moments-mood-ta" data-field="mood-charComment" placeholder="留空=不注入">' + escapeHtml(cp.charComment) + '</textarea>';
+    html += '<div class="moments-mood-label">NPC 评论</div>';
+    html += '<div class="moments-mood-hint">如：NPC 评论热闹一些，可以互相接梗 / NPC 安静围观为主</div>';
+    html += '<textarea class="moments-mood-ta" data-field="mood-npcComment" placeholder="留空=不注入">' + escapeHtml(cp.npcComment) + '</textarea>';
+    html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="close-mood-prompts">完成</button></div>';
+    return html + '</div></div></div>';
+  }
+
+  function renderNpcModal(space, charId) {
+    var sc = getSpaceChar(space, charId); if (!sc) return '';
+    var npcs = getCharNpcs(sc);
+    var html = '<div class="moments-modal-mask" data-action="close-npc-modal"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">' + escapeHtml(sc.charHandle || sc.charName) + ' 的 NPC 好友</div><div class="moments-modal-x" data-action="close-npc-modal">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    html += '<div class="moments-hint">NPC 是氛围组：只在该 char 发朋友圈时评论其动态，不参与 user 触发的评论链。懒人可以完全不添加。</div>';
+    html += '<div class="moments-sec-title">已绑定 NPC<span class="moments-sec-hint">共 ' + npcs.length + ' 个</span></div>';
+    if (!npcs.length) html += '<div class="moments-empty">还没有绑定 NPC</div>';
+    npcs.forEach(function (npc, idx) {
+      html += '<div class="moments-npc-item"><div class="moments-npc-item-info"><div class="moments-npc-item-name">' + escapeHtml(npc.name) + ' <span style="color:#999;font-weight:normal;">@' + escapeHtml(npc.handle) + '</span></div><div class="moments-npc-item-sub">' + escapeHtml(npc.bio || '') + '</div></div><button class="mm-btn danger" data-action="npc-unbind" data-cid="' + escapeHtml(charId) + '" data-idx="' + idx + '">解绑</button></div>';
+    });
+    html += '<div class="moments-div"></div><div class="moments-sec-title">手动添加</div>';
+    html += '<div class="moments-form"><label>名字<input class="moments-input" id="moments-npc-name" placeholder="如 小张"></label><label>handle<input class="moments-input" id="moments-npc-handle" placeholder="如 xiaozhang"></label><label>一句话人设<input class="moments-input" id="moments-npc-bio" placeholder="如 char 的大学室友，爱开玩笑"></label><button class="moments-btn" data-action="npc-add" data-cid="' + escapeHtml(charId) + '">添加</button></div>';
+    html += '<div class="moments-div"></div><div class="moments-sec-title">AI 生成建议<span class="moments-sec-hint">读取该 char 人设生成 4 个候选</span></div>';
+    if (state.npcLoading) {
+      html += '<div class="moments-empty">生成中...</div>';
+    } else {
+      html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="npc-generate" data-cid="' + escapeHtml(charId) + '">生成 4 个候选 NPC</button></div>';
+      (state.npcSuggestions || []).forEach(function (s, idx) {
+        html += '<div class="moments-npc-suggest"><div class="moments-npc-item-info"><div class="moments-npc-item-name">' + escapeHtml(s.name) + ' <span style="color:#999;font-weight:normal;">@' + escapeHtml(s.handle) + '</span></div><div class="moments-npc-item-sub">' + escapeHtml(s.bio || '') + '</div></div><button class="mm-btn" data-action="npc-bind" data-cid="' + escapeHtml(charId) + '" data-idx="' + idx + '">绑定</button></div>';
+      });
+    }
+    html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="close-npc-modal">完成</button></div>';
     return html + '</div></div></div>';
   }
 
@@ -979,6 +1167,11 @@
   }
   function onRootChange(e) {
     var t = e.target; var field = t.getAttribute && t.getAttribute('data-field'); if (!field) return;
+    // 氛围提示词（space 级，无 cid，textarea 失焦时保存）
+    if (field === 'mood-charPost' || field === 'mood-charComment' || field === 'mood-npcComment') {
+      var sp0 = Store.getActiveSpace(); if (sp0) { sp0.customPrompts[field.replace('mood-', '')] = t.value; Store.saveSpaces(); }
+      return;
+    }
     var cid = t.getAttribute('data-cid'); var conv = t.getAttribute('data-conv');
     var space = Store.getActiveSpace(); if (!space || !cid) return;
     var sc = getSpaceChar(space, cid); if (!sc) return;
@@ -1009,6 +1202,55 @@
       case 'open-char-list': state.charListOpen = true; render(); break;
       case 'close-char-list': state.charListOpen = false; render(); break;
       case 'close-mem-mount': state.memMountCharId = null; render(); break;
+
+      case 'open-mood-prompts': state.moodPromptsOpen = true; render(); break;
+      case 'close-mood-prompts': state.moodPromptsOpen = false; render(); break;
+      case 'open-npc-modal': { var npcCid = did(t, 'data-cid'); state.npcModalCharId = npcCid; state.npcSuggestions = []; state.sidebarOpen = false; render(); break; }
+      case 'close-npc-modal': state.npcModalCharId = null; render(); break;
+      case 'npc-add': {
+        var cidA = did(t, 'data-cid'); if (!space) break; var scA = getSpaceChar(space, cidA); if (!scA) break;
+        var nm = $('#moments-npc-name', root) ? trim($('#moments-npc-name', root).value) : '';
+        var hd = $('#moments-npc-handle', root) ? trim($('#moments-npc-handle', root).value) : '';
+        var bo = $('#moments-npc-bio', root) ? trim($('#moments-npc-bio', root).value) : '';
+        if (!nm || !hd) { toast('请填名字和 handle'); break; }
+        scA.npcs.push({ id: uuid(), name: nm, handle: hd, bio: bo, avatar: '' });
+        Store.saveSpaces().then(render); toast('已添加');
+        break;
+      }
+      case 'npc-generate': {
+        var cidG = did(t, 'data-cid'); if (!space) break; var scG = getSpaceChar(space, cidG); if (!scG) break;
+        var cG = findChar(scG.charId) || {};
+        var personaG = cG.persona || cG.bio || scG.charPersona || '';
+        var sysG = '你是 NPC 生成器。根据以下 char 的人设，生成 4 个可能出现在该 char 朋友圈下的 NPC 好友。\n要求：每个 NPC 风格各异，名字自然，handle 简短，bio 一句话人设。\n严格按格式输出，不要多余内容：\n<npc><name>名字</name><handle>handle</handle><bio>一句话人设</bio></npc>\n（重复 4 次）';
+        state.npcLoading = true; render();
+        callAI({ messages: [{ role: 'system', content: sysG }, { role: 'user', content: 'char 名字：' + scG.charName + '\nchar 人设：' + (personaG || '(无)') }], temperature: 0.9 }).then(function (raw) {
+          var list = []; var reN = /<npc>([\s\S]*?)<\/npc>/gi; var mN;
+          while ((mN = reN.exec(raw || ''))) {
+            var blk = mN[1];
+            var nmN = (blk.match(/<name>([\s\S]*?)<\/name>/i) || [])[1] || '';
+            var hdN = (blk.match(/<handle>([\s\S]*?)<\/handle>/i) || [])[1] || '';
+            var boN = (blk.match(/<bio>([\s\S]*?)<\/bio>/i) || [])[1] || '';
+            if (trim(nmN)) list.push({ id: uuid(), name: trim(nmN), handle: trim(hdN) || trim(nmN), bio: trim(boN), avatar: '' });
+          }
+          state.npcSuggestions = list; state.npcLoading = false; render();
+          if (!list.length) toast('未能解析出 NPC，请重试');
+        }).catch(function (err) { state.npcLoading = false; render(); toast('生成失败：' + (err && err.message || '')); });
+        break;
+      }
+      case 'npc-bind': {
+        var cidB = did(t, 'data-cid'); var idxB = parseInt(did(t, 'data-idx'), 10); if (!space || isNaN(idxB)) break;
+        var scB = getSpaceChar(space, cidB); if (!scB) break;
+        var sug = (state.npcSuggestions || [])[idxB]; if (!sug) break;
+        scB.npcs.push({ id: uuid(), name: sug.name, handle: sug.handle, bio: sug.bio, avatar: '' });
+        Store.saveSpaces().then(render); toast('已绑定');
+        break;
+      }
+      case 'npc-unbind': {
+        var cidU = did(t, 'data-cid'); var idxU = parseInt(did(t, 'data-idx'), 10); if (!space || isNaN(idxU)) break;
+        var scU = getSpaceChar(space, cidU); if (!scU) break;
+        scU.npcs.splice(idxU, 1); Store.saveSpaces().then(render);
+        break;
+      }
 
       case 'switch-space': {
         var pid = did(t, 'data-pid'); var per = null;
@@ -1364,6 +1606,15 @@
 // boot loading
 + '.' + ROOT_CLASS + ' .moments-boot{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#EDEDED;gap:14px;}'
 + '.' + ROOT_CLASS + ' .moments-boot-text{font-size:13px;color:#999;}'
+// 氛围提示词 + NPC
++ '.' + ROOT_CLASS + ' .moments-mood-ta{width:100%;min-height:80px;border:1px solid #eee;border-radius:8px;padding:10px;font-size:13px;resize:vertical;font-family:inherit;margin-top:4px;}'
++ '.' + ROOT_CLASS + ' .moments-mood-label{font-size:13px;color:#666;margin-top:12px;}'
++ '.' + ROOT_CLASS + ' .moments-mood-hint{font-size:11px;color:#aaa;margin-top:2px;}'
++ '.' + ROOT_CLASS + ' .moments-npc-item{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid #f0f0f0;border-radius:8px;margin-bottom:8px;}'
++ '.' + ROOT_CLASS + ' .moments-npc-item-info{flex:1;min-width:0;}'
++ '.' + ROOT_CLASS + ' .moments-npc-item-name{font-size:14px;font-weight:500;}'
++ '.' + ROOT_CLASS + ' .moments-npc-item-sub{font-size:11px;color:#999;margin-top:2px;word-break:break-all;}'
++ '.' + ROOT_CLASS + ' .moments-npc-suggest{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px dashed #c8d4e8;border-radius:8px;margin-bottom:8px;background:#f8faff;}'
 + '@keyframes mom-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}';
 
   // ========== 插件注册 ==========
@@ -1372,7 +1623,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.5.0',
+    version: '0.6.0',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
