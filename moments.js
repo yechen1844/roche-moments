@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.0
+ * Roche 朋友圈插件 v0.8.1
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
  * v0.7.1: 顶栏"朋友圈"水平居中；侧边栏界面尺寸调整面板（顶栏高度+底部安全边距滑块实时预览，自动保存，全屏通用）；评论态滚动区底部让出输入栏高度防遮挡
@@ -105,6 +106,7 @@
     uiPrefs: { topbarH: 44, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
+    syncFormatOpen: false,
     tip: null,            // 局部 loading 提示 {text}
     bootLoading: true,    // 首次加载全屏
     allChars: [], allPersonas: [], activePersona: null
@@ -235,7 +237,7 @@
       userPersonaId: per.id, userPersonaName: per.name || per.id,
       userPersonaHandle: per.handle || per.name || '', userPersonaAvatar: per.avatar || '',
       userPersonaBio: per.bio || '', cover: '', chars: [], createdAt: Date.now(),
-      customPrompts: { charPost: '', charComment: '', npcComment: '' },
+      customPrompts: { charPost: '', charComment: '', npcComment: '', syncFormat: {} },
       userIdentity: '', relations: []
     };
     state.spaces.push(sp); Store.saveSpaces(); return sp;
@@ -265,6 +267,33 @@
     var cp = space.customPrompts || {};
     return { charPost: cp.charPost || '', charComment: cp.charComment || '', npcComment: cp.npcComment || '' };
   }
+  // 读取自定义轨迹注入模板（留空 = 用内置默认）
+  function getSyncFormat(space) {
+    var empty = { header:'', userLine:'', intro:'', cat1:'', cat2:'', cat3:'', cat4:'', cat5:'', footer:'' };
+    if (!space || !space.customPrompts || !space.customPrompts.syncFormat) return empty;
+    var sf = space.customPrompts.syncFormat || {};
+    return {
+      header: sf.header || '', userLine: sf.userLine || '', intro: sf.intro || '',
+      cat1: sf.cat1 || '', cat2: sf.cat2 || '', cat3: sf.cat3 || '',
+      cat4: sf.cat4 || '', cat5: sf.cat5 || '', footer: sf.footer || ''
+    };
+  }
+  // 模板变量替换：{varName} → vars[varName] || ''
+  function applyTemplate(tpl, vars) {
+    if (!tpl) return '';
+    return tpl.replace(/\{(\w+)\}/g, function (m, k) {
+      return (vars[k] != null) ? String(vars[k]) : '';
+    });
+  }
+  // 解析 [标签] 行首标记的分类模板，返回 { like:'...', comment:'...', reply:'...', ... }
+  function parseLabeledTemplate(tpl) {
+    var out = {};
+    (tpl || '').split('\n').forEach(function (line) {
+      var m = line.match(/^\[(\w+)\]\s*(.*)$/);
+      if (m) out[m[1]] = m[2];
+    });
+    return out;
+  }
   // char 的 NPC 列表读取（防御旧数据）
   function getCharNpcs(sc) {
     if (!sc || !sc.npcs) return [];
@@ -284,7 +313,14 @@
     }
     return '';
   }
-  // 关系网提示词行：user 身份 + 各 char 身份 + char 间有向关系
+  // user 节点保留字 id（关系网中 user↔char 关系用此 id 标识 user 端）
+  var USER_NODE_ID = '__user__';
+  // 节点显示名：user 节点返回 user 名字，char 节点返回 charName
+  function nodeDisplayName(space, cid) {
+    if (cid === USER_NODE_ID) return space.userPersonaName || space.userPersonaHandle || 'user';
+    return charNameById(space, cid);
+  }
+  // 关系网提示词行：user 身份 + 各 char 身份 + 有向关系（可含 user↔char）
   function relationNetLine(space) {
     if (!space) return '';
     var parts = [];
@@ -299,11 +335,11 @@
     if (space.relations && space.relations.length) {
       var relParts = [];
       space.relations.forEach(function (r) {
-        var fromName = charNameById(space, r.fromCid);
-        var toName = charNameById(space, r.toCid);
+        var fromName = nodeDisplayName(space, r.fromCid);
+        var toName = nodeDisplayName(space, r.toCid);
         if (fromName && toName) relParts.push(fromName + '→' + toName + '（' + r.label + '）');
       });
-      if (relParts.length) parts.push('char 间关系：' + relParts.join('、'));
+      if (relParts.length) parts.push('关系：' + relParts.join('、'));
     }
     if (!parts.length) return '';
     return '【关系网（user 设定，请遵循）】' + parts.join('；') + '。';
@@ -313,19 +349,26 @@
     var dirty = false;
     (state.spaces || []).forEach(function (space) {
       if (!space.customPrompts || typeof space.customPrompts !== 'object') {
-        space.customPrompts = { charPost: '', charComment: '', npcComment: '' };
+        space.customPrompts = { charPost: '', charComment: '', npcComment: '', syncFormat: {} };
         dirty = true;
       } else {
         var cp = space.customPrompts;
         if (cp.charPost == null) { cp.charPost = ''; dirty = true; }
         if (cp.charComment == null) { cp.charComment = ''; dirty = true; }
         if (cp.npcComment == null) { cp.npcComment = ''; dirty = true; }
+        // syncFormat 子字段兜底（全部默认空串 = 用内置默认）
+        if (!cp.syncFormat || typeof cp.syncFormat !== 'object') { cp.syncFormat = {}; dirty = true; }
+        var sf = cp.syncFormat;
+        ['header','userLine','intro','cat1','cat2','cat3','cat4','cat5','footer'].forEach(function (k) {
+          if (sf[k] == null) { sf[k] = ''; dirty = true; }
+        });
       }
       // 关系网字段迁移
       if (space.userIdentity == null) { space.userIdentity = ''; dirty = true; }
       if (!space.relations || !Array.isArray(space.relations)) { space.relations = []; dirty = true; }
       // 收集当前 space 存在的 charId，清理指向已删除 char 的孤立关系
       var existIds = {};
+      existIds[USER_NODE_ID] = true; // user 节点始终存在，user↔char 关系不应被误删
       (space.chars || []).forEach(function (sc) { existIds[sc.charId] = true; });
       var rawRels = space.relations || [];
       var cleanRels = rawRels.filter(function (r) {
@@ -850,7 +893,7 @@
       var postText = (p.text || '(仅图片)').slice(0, 50);
       // ① 我发的朋友圈（含自评/自赞，按时间排序）
       if (isMyPost) {
-        var entry = { postLine: postLine, selfActions: [] };
+        var entry = { postLine: postLine, postTs: p.createdAt, postText: postText, selfActions: [] };
         if (p.comments) p.comments.forEach(function (c) {
           if (c.authorType !== 'char' || c.authorId !== sc.charId) return;
           if (c.createdAt <= sinceTs) return;
@@ -902,19 +945,35 @@
         }
       }
     });
+    var sf = getSyncFormat(space);
+    var gVars = { now: formatStamp(Date.now()), userHandle: userHandle, userName: space.userPersonaName || '', charName: sc.charName, charHandle: sc.charHandle || '' };
     var L = [];
-    L.push(SYNC_PREFIX + ' · 我的朋友圈行为记录 · ' + formatStamp(Date.now()) + ']');
-    if (space) L.push(userDualNameLine(space));
-    L.push(''); L.push('我刚在朋友圈做了这些事 / 看到了这些与我有关的动态（按时间标签排列）：'); L.push('');
+    // 开头行
+    L.push(applyTemplate(sf.header, gVars) || (SYNC_PREFIX + ' · 我的朋友圈行为记录 · ' + gVars.now + ']'));
+    // user 双名字认知行
+    if (sf.userLine) L.push(applyTemplate(sf.userLine, gVars));
+    else L.push(userDualNameLine(space));
+    // 导语
+    L.push(''); L.push(applyTemplate(sf.intro, gVars) || '我刚在朋友圈做了这些事 / 看到了这些与我有关的动态（按时间标签排列）：'); L.push('');
     // ① 我发的朋友圈（含自评/自赞）
     if (myPosts.length) {
       L.push('【我发的朋友圈】');
+      var tpls1 = sf.cat1 ? parseLabeledTemplate(sf.cat1) : null;
       myPosts.forEach(function (entry) {
-        L.push('- ' + entry.postLine);
+        if (tpls1 && tpls1.post) {
+          L.push(applyTemplate(tpls1.post, { ts: formatStamp(entry.postTs), postText: entry.postText, postLine: entry.postLine }));
+        } else {
+          L.push('- ' + entry.postLine);
+        }
         entry.selfActions.forEach(function (a) {
-          if (a.kind === 'like') L.push('  · [' + formatStamp(a.ts) + '] 我给自己的朋友圈点了赞');
-          else if (a.replyToName) L.push('  · [' + formatStamp(a.ts) + '] 我回复了自己朋友圈下 ' + a.replyToName + ' 的评论：' + a.text);
-          else L.push('  · [' + formatStamp(a.ts) + '] 我评论道：' + a.text);
+          var kind = a.kind === 'like' ? 'like' : (a.replyToName ? 'reply' : 'comment');
+          if (tpls1 && tpls1[kind]) {
+            L.push('  ' + applyTemplate(tpls1[kind], { actionTs: formatStamp(a.ts), replyToName: a.replyToName || '', text: a.text || '' }));
+          } else {
+            if (a.kind === 'like') L.push('  · [' + formatStamp(a.ts) + '] 我给自己的朋友圈点了赞');
+            else if (a.replyToName) L.push('  · [' + formatStamp(a.ts) + '] 我回复了自己朋友圈下 ' + a.replyToName + ' 的评论：' + a.text);
+            else L.push('  · [' + formatStamp(a.ts) + '] 我评论道：' + a.text);
+          }
         });
       });
       L.push('');
@@ -923,10 +982,16 @@
     if (othersOnMyPosts.length) {
       L.push('【别人在我朋友圈下的互动】');
       othersOnMyPosts.sort(function (a, b) { return a.ts - b.ts; });
+      var tpls2 = sf.cat2 ? parseLabeledTemplate(sf.cat2) : null;
       othersOnMyPosts.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 给我「' + c.postText + '」的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 回复了我「' + c.postText + '」朋友圈下 ' + c.replyToName + ' 的评论：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 评论了我的朋友圈「' + c.postText + '」：' + c.text);
+        var kind = c.kind === 'like' ? 'like' : (c.replyToName ? 'reply' : 'comment');
+        if (tpls2 && tpls2[kind]) {
+          L.push(applyTemplate(tpls2[kind], { ts: formatStamp(c.ts), fromName: c.fromName, postText: c.postText, replyToName: c.replyToName || '', text: c.text || '' }));
+        } else {
+          if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 给我「' + c.postText + '」的朋友圈点了赞');
+          else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 回复了我「' + c.postText + '」朋友圈下 ' + c.replyToName + ' 的评论：' + c.text);
+          else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 评论了我的朋友圈「' + c.postText + '」：' + c.text);
+        }
       });
       L.push('');
     }
@@ -934,10 +999,16 @@
     if (userInteractions.length) {
       L.push('【我对 user（' + userHandle + '）朋友圈的互动】');
       userInteractions.sort(function (a, b) { return a.ts - b.ts; });
+      var tpls3 = sf.cat3 ? parseLabeledTemplate(sf.cat3) : null;
       userInteractions.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 user「' + c.postText + '」的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 user「' + c.postText + '」朋友圈下的评论：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 user 的朋友圈「' + c.postText + '」：' + c.text);
+        var kind = c.kind === 'like' ? 'like' : (c.replyToName ? 'reply' : 'comment');
+        if (tpls3 && tpls3[kind]) {
+          L.push(applyTemplate(tpls3[kind], { ts: formatStamp(c.ts), onName: c.onName, postText: c.postText, replyToName: c.replyToName || '', text: c.text || '', userHandle: userHandle }));
+        } else {
+          if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 user「' + c.postText + '」的朋友圈点了赞');
+          else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 user「' + c.postText + '」朋友圈下的评论：' + c.text);
+          else L.push('- [' + formatStamp(c.ts) + '] 我评论了 user 的朋友圈「' + c.postText + '」：' + c.text);
+        }
       });
       L.push('');
     }
@@ -945,10 +1016,16 @@
     if (otherCharInteractions.length) {
       L.push('【我对其他 char 朋友圈的互动】');
       otherCharInteractions.sort(function (a, b) { return a.ts - b.ts; });
+      var tpls4 = sf.cat4 ? parseLabeledTemplate(sf.cat4) : null;
       otherCharInteractions.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 ' + c.onName + '「' + c.postText + '」的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下的评论：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 ' + c.onName + ' 的朋友圈「' + c.postText + '」：' + c.text);
+        var kind = c.kind === 'like' ? 'like' : (c.replyToName ? 'reply' : 'comment');
+        if (tpls4 && tpls4[kind]) {
+          L.push(applyTemplate(tpls4[kind], { ts: formatStamp(c.ts), onName: c.onName, postText: c.postText, replyToName: c.replyToName || '', text: c.text || '' }));
+        } else {
+          if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 ' + c.onName + '「' + c.postText + '」的朋友圈点了赞');
+          else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下的评论：' + c.text);
+          else L.push('- [' + formatStamp(c.ts) + '] 我评论了 ' + c.onName + ' 的朋友圈「' + c.postText + '」：' + c.text);
+        }
       });
       L.push('');
     }
@@ -956,9 +1033,15 @@
     if (mentionMe.length) {
       L.push('【别人 @ 我的评论】');
       mentionMe.sort(function (a, b) { return a.ts - b.ts; });
+      var tpls5 = sf.cat5 ? parseLabeledTemplate(sf.cat5) : null;
       mentionMe.forEach(function (c) {
-        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下回复 ' + c.replyToName + ' 时 @ 了我：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下 @ 了我：' + c.text);
+        var kind = c.replyToName ? 'mentionReply' : 'mention';
+        if (tpls5 && tpls5[kind]) {
+          L.push(applyTemplate(tpls5[kind], { ts: formatStamp(c.ts), fromName: c.fromName, onName: c.onName, postText: c.postText, replyToName: c.replyToName || '', text: c.text || '' }));
+        } else {
+          if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下回复 ' + c.replyToName + ' 时 @ 了我：' + c.text);
+          else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下 @ 了我：' + c.text);
+        }
       });
       L.push('');
     }
@@ -966,7 +1049,7 @@
     if (!myPosts.length && !othersOnMyPosts.length && !userInteractions.length && !otherCharInteractions.length && !mentionMe.length) {
       return null;
     }
-    L.push('这是我的私人记忆记录，不必向 user 复述，但可以在对话中自然延续相关话题。');
+    L.push(applyTemplate(sf.footer, gVars) || '这是我的私人记忆记录，不必向 user 复述，但可以在对话中自然延续相关话题。');
     return L.join('\n');
   }
   function injectCharActionToChat(space, sc) {
@@ -1123,6 +1206,7 @@
     if (state.moodPromptsOpen) html += renderMoodPromptsModal(space);
     if (state.npcModalCharId) html += renderNpcModal(space, state.npcModalCharId);
     if (state.relationNetOpen) html += renderRelationNetModal(space);
+    if (state.syncFormatOpen) html += renderSyncFormatModal(space);
     if (state.uiPrefsOpen) html += renderUiPrefsModal();
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
@@ -1281,7 +1365,8 @@
     html += '<div class="moments-sb-item" data-action="toggle-dark"><div class="moments-sb-info"><div class="moments-sb-name">夜间模式</div><div class="moments-sb-sub">' + (state.darkMode ? '已开启' : '已关闭') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-uiprefs"><div class="moments-sb-info"><div class="moments-sb-name">界面尺寸调整</div><div class="moments-sb-sub">顶栏高度 · 底部安全边距</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-mood-prompts"><div class="moments-sb-info"><div class="moments-sb-name">氛围提示词</div><div class="moments-sb-sub">自定义发圈/评论氛围</div></div></div>';
-    html += '<div class="moments-sb-item" data-action="open-relation-net"><div class="moments-sb-info"><div class="moments-sb-name">关系网</div><div class="moments-sb-sub">user/char 身份 · char 间关系</div></div></div>';
+    html += '<div class="moments-sb-item" data-action="open-relation-net"><div class="moments-sb-info"><div class="moments-sb-name">关系网</div><div class="moments-sb-sub">身份设定 · 关系（含 user↔char）</div></div></div>';
+    html += '<div class="moments-sb-item" data-action="open-sync-format"><div class="moments-sb-info"><div class="moments-sb-name">记忆注入格式</div><div class="moments-sb-sub">自定义轨迹行动注入模板</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-subapi"><div class="moments-sb-info"><div class="moments-sb-name">副 API 设置</div><div class="moments-sb-sub">' + (getActiveSubApi() ? getActiveSubApi().name : '默认 roche.ai.chat') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="clear-img-cache"><div class="moments-sb-info"><div class="moments-sb-name">清除本地图片缓存</div></div></div>';
     html += '</div></div>';
@@ -1369,6 +1454,8 @@
       var angle = (2 * Math.PI * i / Math.max(n, 1)) - Math.PI / 2;
       pos[sc.charId] = { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), name: sc.charName, handle: sc.charHandle || sc.charName };
     });
+    // user 节点居中，加入 pos 映射以便 user↔char 有向关系能绘制
+    pos[USER_NODE_ID] = { x: cx, y: cy, name: space.userPersonaName || 'user' };
     var svg = '<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:380px;height:auto;display:block;margin:0 auto;">';
     // defs：箭头 marker
     svg += '<defs><marker id="relArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="rgb(255,92,92)"/></marker></defs>';
@@ -1432,30 +1519,73 @@
       });
     }
     html += '<div class="moments-div"></div>';
-    // char 间关系
-    html += '<div class="moments-sec-title">char 间关系<span class="moments-sec-hint">有向关系（A→B），如师父、恋人、死对头</span></div>';
+    // 关系（可含 user↔char）
+    html += '<div class="moments-sec-title">关系<span class="moments-sec-hint">有向关系（A→B），可连接 user 与 char，如师父、恋人、死对头</span></div>';
     var rels = space.relations || [];
     if (rels.length) {
       rels.forEach(function (rel) {
-        var fromName = charNameById(space, rel.fromCid);
-        var toName = charNameById(space, rel.toCid);
+        var fromName = nodeDisplayName(space, rel.fromCid);
+        var toName = nodeDisplayName(space, rel.toCid);
         html += '<div class="moments-npc-item"><div class="moments-npc-item-info"><div class="moments-npc-item-name">' + escapeHtml(fromName) + ' → ' + escapeHtml(toName) + ' <span style="color:#999;font-weight:normal;">（' + escapeHtml(rel.label) + '）</span></div></div><button class="mm-btn danger" data-action="relation-del" data-rel-id="' + escapeHtml(rel.id) + '">删除</button></div>';
       });
     } else {
-      html += '<div class="moments-empty">尚未添加 char 间关系</div>';
+      html += '<div class="moments-empty">尚未添加关系</div>';
     }
-    // 添加关系表单
-    if (chars.length >= 2) {
+    // 添加关系表单（至少 1 个 char 即可，支持 user↔char）
+    if (chars.length >= 1) {
       html += '<div class="moments-div"></div><div class="moments-sec-title">添加关系</div>';
       html += '<div class="moments-form"><label>从<select class="moments-input" id="rel-from">';
+      html += '<option value="' + USER_NODE_ID + '">user（' + escapeHtml(space.userPersonaName || '') + '）</option>';
       chars.forEach(function (sc) { html += '<option value="' + escapeHtml(sc.charId) + '">' + escapeHtml(sc.charName) + '</option>'; });
       html += '</select></label><label>到<select class="moments-input" id="rel-to">';
+      html += '<option value="' + USER_NODE_ID + '">user（' + escapeHtml(space.userPersonaName || '') + '）</option>';
       chars.forEach(function (sc) { html += '<option value="' + escapeHtml(sc.charId) + '">' + escapeHtml(sc.charName) + '</option>'; });
       html += '</select></label><label>关系标签<input class="moments-input" id="rel-label" placeholder="如：师父/恋人/死对头"></label><button class="moments-btn" data-action="relation-add">添加</button></div>';
-    } else if (chars.length < 2) {
-      html += '<div class="moments-hint">至少绑定 2 个 char 才能添加 char 间关系</div>';
+    } else {
+      html += '<div class="moments-hint">至少绑定 1 个 char 才能添加关系</div>';
     }
     html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="close-relation-net">完成</button></div>';
+    return html + '</div></div></div>';
+  }
+
+  // 自定义轨迹注入格式模态框：user 可自定义 buildActionSummary 输出全部内容
+  function renderSyncFormatModal(space) {
+    var sf = getSyncFormat(space);
+    var userHandle = space.userPersonaHandle || space.userPersonaName || '';
+    var html = '<div class="moments-modal-mask" data-action="close-sync-format"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">记忆注入格式 — ' + escapeHtml(userHandle) + '</div><div class="moments-modal-x" data-action="close-sync-format">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    html += '<div class="moments-hint">自定义注入到 char 单聊短期记忆的轨迹行动格式。留空 = 用内置默认。分类模板用 [标签] 行首标记区分子类型。变量用 {varName} 格式。</div>';
+    // 变量参考面板
+    html += '<div class="moments-sync-vars"><div class="moments-sec-title">可用变量参考</div>';
+    html += '<div class="moments-sync-var-group"><b>全局</b>：{now} 当前时间 · {userHandle} user账户名 · {userName} user真名 · {charName} char名 · {charHandle} char账户名</div>';
+    html += '<div class="moments-sync-var-group"><b>分类①</b>：[post] {ts} {postText} · [like] {actionTs} · [comment] {actionTs} {text} · [reply] {actionTs} {replyToName} {text}</div>';
+    html += '<div class="moments-sync-var-group"><b>分类②③④</b>：[like] {ts} {fromName}/{onName} {postText} · [comment] {ts} {fromName}/{onName} {postText} {text} · [reply] {ts} {fromName}/{onName} {postText} {replyToName} {text}</div>';
+    html += '<div class="moments-sync-var-group"><b>分类⑤</b>：[mention] {ts} {fromName} {onName} {postText} {text} · [mentionReply] {ts} {fromName} {onName} {postText} {replyToName} {text}</div>';
+    html += '</div>';
+    html += '<div class="moments-div"></div>';
+    // 全局模板
+    html += '<div class="moments-sec-title">开头行<span class="moments-sec-hint">留空=默认 [RocheMomentsSync · 我的朋友圈行为记录 · 时间]</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-header" placeholder="' + escapeHtml(SYNC_PREFIX + ' · 我的朋友圈行为记录 · {now}]') + '">' + escapeHtml(sf.header) + '</textarea>';
+    html += '<div class="moments-sec-title">user 双名字认知行<span class="moments-sec-hint">留空=内置默认完整认知行；可用 {userHandle} {userName}</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-userLine" placeholder="留空=内置默认（含 handle 与 name 的完整认知说明）">' + escapeHtml(sf.userLine) + '</textarea>';
+    html += '<div class="moments-sec-title">导语<span class="moments-sec-hint">留空=默认导语</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-intro" placeholder="' + escapeHtml('我刚在朋友圈做了这些事 / 看到了这些与我有关的动态（按时间标签排列）：') + '">' + escapeHtml(sf.intro) + '</textarea>';
+    html += '<div class="moments-div"></div>';
+    // 5 个分类模板
+    html += '<div class="moments-sec-title">分类① 我发的朋友圈<span class="moments-sec-hint">每行一种，[post] 朋友圈行 / [like] 自赞 / [comment] 自评 / [reply] 自回复</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-cat1" rows="4" placeholder="' + escapeHtml('[post] - [{ts}] {postText}\n[like]   · [{actionTs}] 我给自己的朋友圈点了赞\n[comment]   · [{actionTs}] 我评论道：{text}\n[reply]   · [{actionTs}] 我回复了自己朋友圈下 {replyToName} 的评论：{text}') + '">' + escapeHtml(sf.cat1) + '</textarea>';
+    html += '<div class="moments-sec-title">分类② 别人在我朋友圈的互动<span class="moments-sec-hint">[like] / [comment] / [reply]，变量 {ts} {fromName} {postText} {replyToName} {text}</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-cat2" rows="3" placeholder="' + escapeHtml('[like] - [{ts}] {fromName} 给我「{postText}」的朋友圈点了赞\n[comment] - [{ts}] {fromName} 评论了我的朋友圈「{postText}」：{text}\n[reply] - [{ts}] {fromName} 回复了我「{postText}」朋友圈下 {replyToName} 的评论：{text}') + '">' + escapeHtml(sf.cat2) + '</textarea>';
+    html += '<div class="moments-sec-title">分类③ 我对 user 朋友圈的互动<span class="moments-sec-hint">[like] / [comment] / [reply]，变量 {ts} {onName} {postText} {replyToName} {text} {userHandle}</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-cat3" rows="3" placeholder="' + escapeHtml('[like] - [{ts}] 我给 user「{postText}」的朋友圈点了赞\n[comment] - [{ts}] 我评论了 user 的朋友圈「{postText}」：{text}\n[reply] - [{ts}] 我回复了 {replyToName} 在 user「{postText}」朋友圈下的评论：{text}') + '">' + escapeHtml(sf.cat3) + '</textarea>';
+    html += '<div class="moments-sec-title">分类④ 我对其他 char 朋友圈的互动<span class="moments-sec-hint">[like] / [comment] / [reply]，变量 {ts} {onName} {postText} {replyToName} {text}</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-cat4" rows="3" placeholder="' + escapeHtml('[like] - [{ts}] 我给 {onName}「{postText}」的朋友圈点了赞\n[comment] - [{ts}] 我评论了 {onName} 的朋友圈「{postText}」：{text}\n[reply] - [{ts}] 我回复了 {replyToName} 在 {onName}「{postText}」朋友圈下的评论：{text}') + '">' + escapeHtml(sf.cat4) + '</textarea>';
+    html += '<div class="moments-sec-title">分类⑤ 别人 @ 我的评论<span class="moments-sec-hint">[mention] / [mentionReply]，变量 {ts} {fromName} {onName} {postText} {replyToName} {text}</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-cat5" rows="2" placeholder="' + escapeHtml('[mention] - [{ts}] {fromName} 在 {onName}「{postText}」朋友圈下 @ 了我：{text}\n[mentionReply] - [{ts}] {fromName} 在 {onName}「{postText}」朋友圈下回复 {replyToName} 时 @ 了我：{text}') + '">' + escapeHtml(sf.cat5) + '</textarea>';
+    html += '<div class="moments-div"></div>';
+    // 结尾
+    html += '<div class="moments-sec-title">结尾<span class="moments-sec-hint">留空=默认结尾</span></div>';
+    html += '<textarea class="moments-sync-ta" data-field="sync-footer" placeholder="' + escapeHtml('这是我的私人记忆记录，不必向 user 复述，但可以在对话中自然延续相关话题。') + '">' + escapeHtml(sf.footer) + '</textarea>';
+    html += '<div class="moments-btn-row"><button class="mm-btn danger" data-action="sync-reset">恢复全部默认</button><button class="moments-btn ghost" data-action="close-sync-format">完成</button></div>';
     return html + '</div></div></div>';
   }
 
@@ -1626,6 +1756,15 @@
       var scR = getSpaceChar(spR2, cidR); if (scR) { scR.customIdentity = t.value; Store.saveSpaces(); }
       return;
     }
+    // 自定义记忆注入模板（space 级，textarea 输入时实时保存）
+    if (field && field.indexOf('sync-') === 0) {
+      var spS = Store.getActiveSpace(); if (!spS) return;
+      var key = field.replace('sync-', '');
+      if (!spS.customPrompts) spS.customPrompts = {};
+      if (!spS.customPrompts.syncFormat) spS.customPrompts.syncFormat = {};
+      spS.customPrompts.syncFormat[key] = t.value; Store.saveSpaces();
+      return;
+    }
     var cid = t.getAttribute('data-cid'); var conv = t.getAttribute('data-conv');
     var space = Store.getActiveSpace(); if (!space || !cid) return;
     var sc = getSpaceChar(space, cid); if (!sc) return;
@@ -1665,12 +1804,21 @@
       case 'close-mood-prompts': state.moodPromptsOpen = false; render(); break;
       case 'open-relation-net': state.relationNetOpen = true; render(); break;
       case 'close-relation-net': state.relationNetOpen = false; render(); break;
+      case 'open-sync-format': state.syncFormatOpen = true; render(); break;
+      case 'close-sync-format': state.syncFormatOpen = false; render(); break;
+      case 'sync-reset': {
+        if (!space) break;
+        if (!space.customPrompts) space.customPrompts = {};
+        space.customPrompts.syncFormat = { header:'', userLine:'', intro:'', cat1:'', cat2:'', cat3:'', cat4:'', cat5:'', footer:'' };
+        Store.saveSpaces(); render(); toast('已恢复全部默认');
+        break;
+      }
       case 'relation-add': {
         if (!space) break;
         var fromEl = $('#rel-from', root); var toEl = $('#rel-to', root); var labelEl = $('#rel-label', root);
         if (!fromEl || !toEl || !labelEl) break;
         var fromCid = trim(fromEl.value); var toCid = trim(toEl.value); var relLabel = trim(labelEl.value);
-        if (!fromCid || !toCid) { toast('请选择 char'); break; }
+        if (!fromCid || !toCid) { toast('请选择节点'); break; }
         if (fromCid === toCid) { toast('不能指向自己'); break; }
         if (!relLabel) { toast('请填关系标签'); break; }
         if (!space.relations) space.relations = [];
@@ -2030,6 +2178,10 @@
 + '.' + ROOT_CLASS + ' .moments-sec-title{font-size:14px;font-weight:600;margin-bottom:8px;}'
 + '.' + ROOT_CLASS + ' .moments-sec-hint{font-size:11px;color:#999;font-weight:400;margin-left:6px;}'
 + '.' + ROOT_CLASS + ' .moments-relation-svg{padding:10px;background:linear-gradient(135deg,#fafafa,#f0f0f0);border-radius:8px;margin-bottom:8px;}'
++ '.' + ROOT_CLASS + ' .moments-sync-vars{background:#fafafa;border-radius:8px;padding:10px;margin-bottom:8px;}'
++ '.' + ROOT_CLASS + ' .moments-sync-var-group{font-size:11px;color:#666;line-height:1.7;margin-bottom:4px;}'
++ '.' + ROOT_CLASS + ' .moments-sync-var-group b{color:#333;}'
++ '.' + ROOT_CLASS + ' .moments-sync-ta{width:100%;min-height:36px;border:1px solid #ddd;border-radius:6px;padding:8px 10px;font-size:12px;font-family:monospace;resize:vertical;box-sizing:border-box;margin-bottom:12px;}'
 + '.' + ROOT_CLASS + ' .moments-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;gap:12px;}'
 + '.' + ROOT_CLASS + ' .moments-row-label{font-size:14px;}'
 + '.' + ROOT_CLASS + ' .moments-input{border:1px solid #ddd;border-radius:6px;padding:6px 10px;font-size:14px;}'
@@ -2138,7 +2290,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.0',
+    version: '0.8.1',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
