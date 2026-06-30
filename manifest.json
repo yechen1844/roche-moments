@@ -1,8 +1,8 @@
 {
   "id": "roche-moments",
   "name": "朋友圈",
-  "version": "0.6.0",
-  "description": "完全拟真微信朋友圈的沉浸式模拟。v0.6：记忆/上下文加时间标签、氛围提示词（发圈/评论/NPC）、per-char NPC系统（手动+AI生成）、buildActionSummary 4分类修复人称矛盾。支持user人设绑定多char、char主动发朋友圈、AI评论互动、记忆挂载、双模式记忆同步。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
+  "version": "0.7.0",
+  "description": "完全拟真微信朋友圈的沉浸式模拟。v0.7：召唤评论批量模型决策（人设+最近朋友圈+绑定记忆）、user双名字认知、buildActionSummary 5分类（别人在我朋友圈互动+别人@我）、心形点赞图标、封面图per-char/per-user、夜间模式、拆分enabled与memSync开关。支持user人设绑定多char、char主动发朋友圈、AI评论互动、记忆挂载、双模式记忆同步。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
   "author": "RocheMoments",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-moments/main/moments.js",
   "hash": "",
