@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.7.1
+ * Roche 朋友圈插件 v0.7.2
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
  * v0.7.1: 顶栏"朋友圈"水平居中；侧边栏界面尺寸调整面板（顶栏高度+底部安全边距滑块实时预览，自动保存，全屏通用）；评论态滚动区底部让出输入栏高度防遮挡
  * v0.7: 召唤评论批量模型决策（人设+最近朋友圈+绑定记忆）；user双名字认知；buildActionSummary 5分类（新增②别人在我朋友圈互动+⑤别人@我）；心形点赞图标；封面图per-char/per-user；夜间模式；拆分enabled(发圈+评论)与memSync(记忆注入)
  * v0.6: 记忆/上下文加时间标签；氛围提示词（发圈/评论/NPC）；per-char NPC 系统（手动+AI生成）；buildActionSummary 4 分类修复人称矛盾
@@ -242,7 +243,7 @@
     space.chars.push({
       charId: c.id, charName: c.name || c.id, charHandle: c.handle || c.name || '',
       charAvatar: c.avatar || '', charPersona: c.persona || c.bio || '', charBio: c.bio || '',
-      enabled: true, memoryMounts: [], nextPostAt: 0, postIntervalMin: 30,
+      enabled: true, postEnabled: true, commentEnabled: true, memoryMounts: [], nextPostAt: 0, postIntervalMin: 30,
       autoCommentCount: DEFAULT_AUTO_COMMENT, lastSyncAt: 0, npcs: [], cover: '', memSync: true
     });
     Store.saveSpaces();
@@ -285,6 +286,9 @@
         if (!sc.npcs || !Array.isArray(sc.npcs)) { sc.npcs = []; dirty = true; }
         if (sc.memSync == null) { sc.memSync = true; dirty = true; }
         if (sc.cover == null) { sc.cover = ''; dirty = true; }
+        // 拆分 enabled 为 postEnabled + commentEnabled；旧数据按原 enabled 值迁移
+        if (sc.postEnabled == null) { sc.postEnabled = sc.enabled != null ? sc.enabled : true; dirty = true; }
+        if (sc.commentEnabled == null) { sc.commentEnabled = sc.enabled != null ? sc.enabled : true; dirty = true; }
       });
     });
     if (dirty) Store.saveSpaces();
@@ -372,7 +376,7 @@
       // 可被 @ 的人名列表（user + 所有启用的 char）
       var mentionables = [];
       mentionables.push(space.userPersonaHandle || space.userPersonaName);
-      (space.chars || []).forEach(function (ch) { if (ch.enabled) mentionables.push(ch.charHandle || ch.charName); });
+      (space.chars || []).forEach(function (ch) { if (ch.postEnabled || ch.commentEnabled) mentionables.push(ch.charHandle || ch.charName); });
       sys += '\n可以 @ 的人：' + mentionables.join('、') + '（在评论里用 @名字 的形式提及）\n';
       sys += '\n现在请你做两件事：\n';
       sys += '1. 发一条属于你自己的朋友圈\n';
@@ -463,7 +467,7 @@
     var ids = [];
     if (!text) return ids;
     (space.chars || []).forEach(function (sc) {
-      if (!sc.enabled) return;
+      if (!sc.commentEnabled) return;
       var names = [sc.charHandle, sc.charName].filter(Boolean);
       for (var i = 0; i < names.length; i++) {
         if (text.indexOf('@' + names[i]) >= 0) { ids.push(sc.charId); break; }
@@ -490,7 +494,7 @@
     // 可被 @ 的人名列表（user + 所有启用的 char）
     var mentionables = [];
     mentionables.push(space.userPersonaHandle || space.userPersonaName);
-    (space.chars || []).forEach(function (ch) { if (ch.enabled) mentionables.push(ch.charHandle || ch.charName); });
+    (space.chars || []).forEach(function (ch) { if (ch.postEnabled || ch.commentEnabled) mentionables.push(ch.charHandle || ch.charName); });
     return loadMountedMemory(sc).then(function (mem) {
       var sys = '你是「' + sc.charName + '」，正在看「' + (post.authorHandle || post.authorName) + '」的微信朋友圈。\n';
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
@@ -595,7 +599,7 @@
   // 容错：单个 char 失败不中断；forceCharIds 为必定参与评论的 char（user @触发）
   function generateAutoComments(space, post, count, forceCharIds) {
     // 批量模型决策：把多个 char 的人设/最近朋友圈/记忆打包给模型，由模型决定谁评论
-    var pool = (space.chars || []).filter(function (c) { return c.enabled; });
+    var pool = (space.chars || []).filter(function (c) { return c.commentEnabled; });
     if (!pool.length) return Promise.resolve([]);
     // 被 @ 的 char 必须评论
     var mandatory = [];
@@ -647,7 +651,7 @@
       sys += '---\n' + userDualNameLine(space) + '\n\n';
       var mentionables = [];
       mentionables.push(space.userPersonaHandle || space.userPersonaName);
-      (space.chars || []).forEach(function (ch) { if (ch.enabled) mentionables.push(ch.charHandle || ch.charName); });
+      (space.chars || []).forEach(function (ch) { if (ch.postEnabled || ch.commentEnabled) mentionables.push(ch.charHandle || ch.charName); });
       sys += '可以 @ 的人：' + mentionables.join('、') + '（在评论里用 @名字 形式提及）\n';
       if (prompts.charComment) sys += '【评论氛围提示（user 设定，请遵循）】' + prompts.charComment + '\n';
       if (mandatory.length) sys += '被明确 @ 的 char（必须评论至少一条）：' + mandatory.map(function (sc) { return '@' + (sc.charHandle || sc.charName); }).join('、') + '\n';
@@ -761,6 +765,7 @@
       var isMyPost = p.authorType === 'char' && p.authorId === sc.charId;
       var onName = p.authorType === 'user' ? userHandle : (p.authorHandle || p.authorName);
       var postLine = '[' + formatStamp(p.createdAt) + '] ' + (p.text || '(仅图片)');
+      var postText = (p.text || '(仅图片)').slice(0, 50);
       // ① 我发的朋友圈（含自评/自赞，按时间排序）
       if (isMyPost) {
         var entry = { postLine: postLine, selfActions: [] };
@@ -785,15 +790,15 @@
         var fromName = c.authorHandle || c.authorName;
         // ⑤ 别人 @ 我的评论
         if (!isMine && mentionsMe(c.text)) {
-          mentionMe.push({ ts: c.createdAt, fromName: fromName, onName: onName, text: c.text, replyToName: c.replyToName });
+          mentionMe.push({ ts: c.createdAt, fromName: fromName, onName: onName, postText: postText, text: c.text, replyToName: c.replyToName });
         }
         // ② 别人在我朋友圈下的评论
         if (isMyPost && !isMine) {
-          othersOnMyPosts.push({ ts: c.createdAt, kind: 'comment', fromName: fromName, text: c.text, replyToName: c.replyToName });
+          othersOnMyPosts.push({ ts: c.createdAt, kind: 'comment', fromName: fromName, postText: postText, text: c.text, replyToName: c.replyToName });
         }
         // ③④ 我对别人朋友圈的评论
         if (!isMyPost && isMine) {
-          var item = { ts: c.createdAt, kind: 'comment', replyToName: c.replyToName, text: c.text, onName: onName };
+          var item = { ts: c.createdAt, kind: 'comment', replyToName: c.replyToName, text: c.text, onName: onName, postText: postText };
           if (p.authorType === 'user') userInteractions.push(item);
           else otherCharInteractions.push(item);
         }
@@ -805,11 +810,11 @@
         if (lkTs2 <= sinceTs) continue;
         // ② 别人给我点赞
         if (isMyPost && lk.id !== sc.charId) {
-          othersOnMyPosts.push({ ts: lkTs2, kind: 'like', fromName: lk.name });
+          othersOnMyPosts.push({ ts: lkTs2, kind: 'like', fromName: lk.name, postText: postText });
         }
         // ③④ 我给别人的点赞
         if (!isMyPost && lk.id === sc.charId) {
-          var lItem = { ts: lkTs2, kind: 'like', onName: onName };
+          var lItem = { ts: lkTs2, kind: 'like', onName: onName, postText: postText };
           if (p.authorType === 'user') userInteractions.push(lItem);
           else otherCharInteractions.push(lItem);
         }
@@ -837,9 +842,9 @@
       L.push('【别人在我朋友圈下的互动】');
       othersOnMyPosts.sort(function (a, b) { return a.ts - b.ts; });
       othersOnMyPosts.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 给我的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 回复了我朋友圈下 ' + c.replyToName + '：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 评论了我的朋友圈：' + c.text);
+        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 给我「' + c.postText + '」的朋友圈点了赞');
+        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 回复了我「' + c.postText + '」朋友圈下 ' + c.replyToName + ' 的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 评论了我的朋友圈「' + c.postText + '」：' + c.text);
       });
       L.push('');
     }
@@ -848,9 +853,9 @@
       L.push('【我对 user（' + userHandle + '）朋友圈的互动】');
       userInteractions.sort(function (a, b) { return a.ts - b.ts; });
       userInteractions.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 user 的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 user 朋友圈下的评论：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 user 的朋友圈：' + c.text);
+        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 user「' + c.postText + '」的朋友圈点了赞');
+        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 user「' + c.postText + '」朋友圈下的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 user 的朋友圈「' + c.postText + '」：' + c.text);
       });
       L.push('');
     }
@@ -859,9 +864,9 @@
       L.push('【我对其他 char 朋友圈的互动】');
       otherCharInteractions.sort(function (a, b) { return a.ts - b.ts; });
       otherCharInteractions.forEach(function (c) {
-        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 ' + c.onName + ' 的朋友圈点了赞');
-        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 ' + c.onName + ' 朋友圈下的评论：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 ' + c.onName + ' 的朋友圈：' + c.text);
+        if (c.kind === 'like') L.push('- [' + formatStamp(c.ts) + '] 我给 ' + c.onName + '「' + c.postText + '」的朋友圈点了赞');
+        else if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] 我回复了 ' + c.replyToName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下的评论：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] 我评论了 ' + c.onName + ' 的朋友圈「' + c.postText + '」：' + c.text);
       });
       L.push('');
     }
@@ -870,13 +875,14 @@
       L.push('【别人 @ 我的评论】');
       mentionMe.sort(function (a, b) { return a.ts - b.ts; });
       mentionMe.forEach(function (c) {
-        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + ' 朋友圈下回复 ' + c.replyToName + ' 时 @ 了我：' + c.text);
-        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + ' 朋友圈下 @ 了我：' + c.text);
+        if (c.replyToName) L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下回复 ' + c.replyToName + ' 时 @ 了我：' + c.text);
+        else L.push('- [' + formatStamp(c.ts) + '] ' + c.fromName + ' 在 ' + c.onName + '「' + c.postText + '」朋友圈下 @ 了我：' + c.text);
       });
       L.push('');
     }
+    // 5 分类全空：没有任何新行为，返回 null 让调用方跳过注入（不写空记录到聊天）
     if (!myPosts.length && !othersOnMyPosts.length && !userInteractions.length && !otherCharInteractions.length && !mentionMe.length) {
-      L.push('（这段时间我没有在朋友圈做任何事，也没有人 @ 我。）'); L.push('');
+      return null;
     }
     L.push('这是我的私人记忆记录，不必向 user 复述，但可以在对话中自然延续相关话题。');
     return L.join('\n');
@@ -887,6 +893,8 @@
     (sc.memoryMounts || []).forEach(function (m) { if (m.enabled && !m.isGroup) dmMount = m; });
     if (!dmMount) return Promise.resolve({ ok: false, reason: '该 char 未挂载单聊会话' });
     var summary = buildActionSummary(space, sc, sinceTs);
+    // 没有新行为时不注入空记录（buildActionSummary 返回 null 表示全空）
+    if (!summary) return Promise.resolve({ ok: false, reason: '没有可同步的新行为' });
     var convId = dmMount.conversationId;
     return openRocheDb().then(function (db) {
       var now = Date.now();
@@ -932,7 +940,7 @@
       var now = Date.now(); var tasks = [];
       state.spaces.forEach(function (space) {
         (space.chars || []).forEach(function (sc) {
-          if (!sc.enabled) return;
+          if (!sc.postEnabled) return;
           if (!sc.nextPostAt) { sc.nextPostAt = now + randomInterval(sc.postIntervalMin || 30); tasks.push(function () { return Store.saveSpaces(); }); }
           else if (now >= sc.nextPostAt) {
             sc.nextPostAt = now + randomInterval(sc.postIntervalMin || 30);
@@ -1147,7 +1155,7 @@
       space.chars.forEach(function (sc) {
         html += '<div class="moments-sb-item col" data-action="view-char" data-cid="' + escapeHtml(sc.charId) + '">';
         html += '<div class="moments-sb-row"><div class="moments-avatar sm">' + (sc.charAvatar ? '<img src="' + escapeHtml(sc.charAvatar) + '">' : '<div class="moments-avatar-fb">' + escapeHtml((sc.charName || '?').slice(0, 1)) + '</div>') + '</div>';
-        html += '<div class="moments-sb-info"><div class="moments-sb-name">' + escapeHtml(sc.charHandle || sc.charName) + '</div><div class="moments-sb-sub">' + (sc.enabled ? '已开启' : '已关闭') + ' · ' + (sc.postIntervalMin || 30) + '分钟</div></div></div>';
+        html += '<div class="moments-sb-info"><div class="moments-sb-name">' + escapeHtml(sc.charHandle || sc.charName) + '</div><div class="moments-sb-sub">发圈' + (sc.postEnabled ? '开' : '关') + ' · 评论' + (sc.commentEnabled ? '开' : '关') + ' · ' + (sc.postIntervalMin || 30) + '分钟</div></div></div>';
         html += '<div class="moments-sb-btns">';
         html += '<span class="mm-btn" data-action="char-post-now" data-cid="' + escapeHtml(sc.charId) + '">发一条</span>';
         html += '<span class="mm-btn" data-action="open-mem-mount" data-cid="' + escapeHtml(sc.charId) + '">记忆</span>';
@@ -1183,7 +1191,8 @@
   function renderMemMountModal(space, charId) {
     var sc = getSpaceChar(space, charId); if (!sc) return '';
     var html = '<div class="moments-modal-mask" data-action="close-mem-mount"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">' + escapeHtml(sc.charHandle || sc.charName) + ' 的记忆挂载</div><div class="moments-modal-x" data-action="close-mem-mount">' + ICON.close + '</div></div><div class="moments-modal-bd">';
-    html += '<div class="moments-row"><div class="moments-row-label">开启朋友圈功能（主动发圈 + 参与评论）</div><div class="moments-sw' + (sc.enabled ? ' on' : '') + '" data-action="toggle-enabled" data-cid="' + escapeHtml(charId) + '"><i></i></div></div>';
+    html += '<div class="moments-row"><div class="moments-row-label">主动发朋友圈<span class="moments-sec-hint">后台定时自动发圈</span></div><div class="moments-sw' + (sc.postEnabled ? ' on' : '') + '" data-action="toggle-post" data-cid="' + escapeHtml(charId) + '"><i></i></div></div>';
+    html += '<div class="moments-row"><div class="moments-row-label">参与评论<span class="moments-sec-hint">自动评论与被 @ 召唤</span></div><div class="moments-sw' + (sc.commentEnabled ? ' on' : '') + '" data-action="toggle-comment" data-cid="' + escapeHtml(charId) + '"><i></i></div></div>';
     html += '<div class="moments-row"><div class="moments-row-label">关闭时短期记忆注入</div><div class="moments-sw' + (sc.memSync ? ' on' : '') + '" data-action="toggle-mem-sync" data-cid="' + escapeHtml(charId) + '"><i></i></div></div>';
     html += '<div class="moments-row"><div class="moments-row-label">主动发圈间隔（分钟，最小30）</div><input class="moments-input" type="number" min="30" value="' + (sc.postIntervalMin || 30) + '" data-field="interval" data-cid="' + escapeHtml(charId) + '"></div>';
     html += '<div class="moments-row"><div class="moments-row-label">被评论时自动评论数（0-8）</div><input class="moments-input" type="number" min="0" max="8" value="' + (sc.autoCommentCount == null ? DEFAULT_AUTO_COMMENT : sc.autoCommentCount) + '" data-field="autocomment" data-cid="' + escapeHtml(charId) + '"></div>';
@@ -1302,7 +1311,7 @@
     var html = '<div class="moments-modal-mask" data-action="close-subject"><div class="moments-sheet" data-stop="1"><div class="moments-sheet-title">切换查看主体</div>';
     html += '<div class="moments-sheet-item' + (state.currentSubject === 'user' ? ' active' : '') + '" data-action="set-subject" data-sub="user"><div class="moments-avatar sm">' + (space.userPersonaAvatar ? '<img src="' + escapeHtml(space.userPersonaAvatar) + '">' : '<div class="moments-avatar-fb">' + escapeHtml((space.userPersonaName || '?').slice(0, 1)) + '</div>') + '</div><div class="moments-sheet-info"><div class="moments-sheet-name">' + escapeHtml(space.userPersonaHandle || space.userPersonaName) + '</div><div class="moments-sheet-sub">user 视角（看全部）</div></div></div>';
     (space.chars || []).forEach(function (sc) {
-      if (!sc.enabled) return;
+      if (!sc.postEnabled && !sc.commentEnabled) return;
       html += '<div class="moments-sheet-item' + (state.currentSubject === sc.charId ? ' active' : '') + '" data-action="set-subject" data-sub="' + escapeHtml(sc.charId) + '"><div class="moments-avatar sm">' + (sc.charAvatar ? '<img src="' + escapeHtml(sc.charAvatar) + '">' : '<div class="moments-avatar-fb">' + escapeHtml((sc.charName || '?').slice(0, 1)) + '</div>') + '</div><div class="moments-sheet-info"><div class="moments-sheet-name">' + escapeHtml(sc.charHandle || sc.charName) + '</div><div class="moments-sheet-sub">char 视角（只看 ta 的）</div></div></div>';
     });
     return html + '</div></div>';
@@ -1488,7 +1497,8 @@
       case 'bind-char': { var cid2 = did(t, 'data-cid'); if (space) { bindCharToSpace(space, cid2); state.charListOpen = false; render(); } break; }
       case 'unbind-char': { var cid3 = did(t, 'data-cid'); confirmBox({ message: '确定解绑该 char？历史朋友圈保留。' }).then(function (ok) { if (ok && space) { unbindCharFromSpace(space, cid3); render(); } }); break; }
       case 'open-mem-mount': { var cid4 = did(t, 'data-cid'); state.memMountCharId = cid4; state.sidebarOpen = false; render(); loadConversationsForChar(cid4); break; }
-      case 'toggle-enabled': { var cid5 = did(t, 'data-cid'); if (space) { var sc5 = getSpaceChar(space, cid5); if (sc5) { sc5.enabled = !sc5.enabled; Store.saveSpaces().then(render); } } break; }
+      case 'toggle-post': { var cidP = did(t, 'data-cid'); if (space) { var scP = getSpaceChar(space, cidP); if (scP) { scP.postEnabled = !scP.postEnabled; Store.saveSpaces().then(render); } } break; }
+      case 'toggle-comment': { var cidC = did(t, 'data-cid'); if (space) { var scC = getSpaceChar(space, cidC); if (scC) { scC.commentEnabled = !scC.commentEnabled; Store.saveSpaces().then(render); } } break; }
       case 'toggle-mem-sync': { var cidMs = did(t, 'data-cid'); if (space) { var scMs = getSpaceChar(space, cidMs); if (scMs) { scMs.memSync = !scMs.memSync; Store.saveSpaces().then(render); } } break; }
       case 'toggle-mount': {
         var cid6 = did(t, 'data-cid'); var convId = did(t, 'data-conv');
@@ -1881,7 +1891,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.7.1',
+    version: '0.7.2',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
