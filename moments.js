@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.7.2
+ * Roche 朋友圈插件 v0.8.0
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
  * v0.7.1: 顶栏"朋友圈"水平居中；侧边栏界面尺寸调整面板（顶栏高度+底部安全边距滑块实时预览，自动保存，全屏通用）；评论态滚动区底部让出输入栏高度防遮挡
  * v0.7: 召唤评论批量模型决策（人设+最近朋友圈+绑定记忆）；user双名字认知；buildActionSummary 5分类（新增②别人在我朋友圈互动+⑤别人@我）；心形点赞图标；封面图per-char/per-user；夜间模式；拆分enabled(发圈+评论)与memSync(记忆注入)
@@ -103,6 +104,7 @@
     charListOpen: false, commentTarget: null, darkMode: false, uiPrefsOpen: false,
     uiPrefs: { topbarH: 44, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
+    relationNetOpen: false,
     tip: null,            // 局部 loading 提示 {text}
     bootLoading: true,    // 首次加载全屏
     allChars: [], allPersonas: [], activePersona: null
@@ -120,7 +122,7 @@
         Store._get(KEYS.DARK, false), Store._get(KEYS.UIPREFS, null)
       ]).then(function (r) {
         state.spaces = r[0] || []; state.posts = r[1] || []; state.notifs = r[2] || [];
-        state.subapi = r[3] || []; state.syncstate = r[4] || []; state.activeSpaceId = r[5];
+        state.subapi = r[3] || []; state.syncstate = (r[4] && typeof r[4] === 'object' && !Array.isArray(r[4])) ? r[4] : {}; state.activeSpaceId = r[5];
         state.darkMode = !!r[6];
         if (r[7] && typeof r[7] === 'object') {
           if (r[7].topbarH != null) state.uiPrefs.topbarH = r[7].topbarH;
@@ -233,7 +235,8 @@
       userPersonaId: per.id, userPersonaName: per.name || per.id,
       userPersonaHandle: per.handle || per.name || '', userPersonaAvatar: per.avatar || '',
       userPersonaBio: per.bio || '', cover: '', chars: [], createdAt: Date.now(),
-      customPrompts: { charPost: '', charComment: '', npcComment: '' }
+      customPrompts: { charPost: '', charComment: '', npcComment: '' },
+      userIdentity: '', relations: []
     };
     state.spaces.push(sp); Store.saveSpaces(); return sp;
   }
@@ -244,12 +247,16 @@
       charId: c.id, charName: c.name || c.id, charHandle: c.handle || c.name || '',
       charAvatar: c.avatar || '', charPersona: c.persona || c.bio || '', charBio: c.bio || '',
       enabled: true, postEnabled: true, commentEnabled: true, memoryMounts: [], nextPostAt: 0, postIntervalMin: 30,
-      autoCommentCount: DEFAULT_AUTO_COMMENT, lastSyncAt: 0, npcs: [], cover: '', memSync: true
+      autoCommentCount: DEFAULT_AUTO_COMMENT, lastSyncAt: 0, npcs: [], cover: '', memSync: true, customIdentity: ''
     });
     Store.saveSpaces();
   }
   function unbindCharFromSpace(space, cid) {
     space.chars = space.chars.filter(function (c) { return c.charId !== cid; });
+    // 清理指向被解绑 char 的关系
+    if (space.relations && space.relations.length) {
+      space.relations = space.relations.filter(function (r) { return r.fromCid !== cid && r.toCid !== cid; });
+    }
     Store.saveSpaces();
   }
   // 氛围提示词读取（防御旧数据）
@@ -269,6 +276,38 @@
     var h = space.userPersonaHandle || '', n = space.userPersonaName || '';
     return '朋友圈空间主人 user 的账户名（handle）是「' + h + '」，真实名字是「' + n + '」。这两个指的是同一个人：你在朋友圈 @ user 时用 @' + h + '，在聊天里可以叫 ' + n + '，但必须知道二者是同一人，不要把朋友圈里 @' + h + ' 的内容当成别人的。';
   }
+  // 按 charId 查 charName
+  function charNameById(space, cid) {
+    if (!space || !space.chars) return '';
+    for (var i = 0; i < space.chars.length; i++) {
+      if (space.chars[i].charId === cid) return space.chars[i].charName;
+    }
+    return '';
+  }
+  // 关系网提示词行：user 身份 + 各 char 身份 + char 间有向关系
+  function relationNetLine(space) {
+    if (!space) return '';
+    var parts = [];
+    if (space.userIdentity) parts.push('user 身份：' + space.userIdentity);
+    if (space.chars && space.chars.length) {
+      var idParts = [];
+      space.chars.forEach(function (sc) {
+        if (sc.customIdentity) idParts.push(sc.charName + '：' + sc.customIdentity);
+      });
+      if (idParts.length) parts.push('char 身份：' + idParts.join('、'));
+    }
+    if (space.relations && space.relations.length) {
+      var relParts = [];
+      space.relations.forEach(function (r) {
+        var fromName = charNameById(space, r.fromCid);
+        var toName = charNameById(space, r.toCid);
+        if (fromName && toName) relParts.push(fromName + '→' + toName + '（' + r.label + '）');
+      });
+      if (relParts.length) parts.push('char 间关系：' + relParts.join('、'));
+    }
+    if (!parts.length) return '';
+    return '【关系网（user 设定，请遵循）】' + parts.join('；') + '。';
+  }
   // 旧数据兼容：补 customPrompts / npcs 字段
   function normalizeSpaces() {
     var dirty = false;
@@ -282,10 +321,22 @@
         if (cp.charComment == null) { cp.charComment = ''; dirty = true; }
         if (cp.npcComment == null) { cp.npcComment = ''; dirty = true; }
       }
+      // 关系网字段迁移
+      if (space.userIdentity == null) { space.userIdentity = ''; dirty = true; }
+      if (!space.relations || !Array.isArray(space.relations)) { space.relations = []; dirty = true; }
+      // 收集当前 space 存在的 charId，清理指向已删除 char 的孤立关系
+      var existIds = {};
+      (space.chars || []).forEach(function (sc) { existIds[sc.charId] = true; });
+      var rawRels = space.relations || [];
+      var cleanRels = rawRels.filter(function (r) {
+        return r && r.id && r.fromCid && r.toCid && existIds[r.fromCid] && existIds[r.toCid];
+      });
+      if (cleanRels.length !== rawRels.length) { space.relations = cleanRels; dirty = true; }
       (space.chars || []).forEach(function (sc) {
         if (!sc.npcs || !Array.isArray(sc.npcs)) { sc.npcs = []; dirty = true; }
         if (sc.memSync == null) { sc.memSync = true; dirty = true; }
         if (sc.cover == null) { sc.cover = ''; dirty = true; }
+        if (sc.customIdentity == null) { sc.customIdentity = ''; dirty = true; }
         // 拆分 enabled 为 postEnabled + commentEnabled；旧数据按原 enabled 值迁移
         if (sc.postEnabled == null) { sc.postEnabled = sc.enabled != null ? sc.enabled : true; dirty = true; }
         if (sc.commentEnabled == null) { sc.commentEnabled = sc.enabled != null ? sc.enabled : true; dirty = true; }
@@ -368,8 +419,11 @@
       }).join('\n\n');
       var sys = '你是「' + sc.charName + '」，此刻正在刷微信朋友圈。\n';
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
+      if (sc.customIdentity) sys += '你在关系网中的身份：' + sc.customIdentity + '\n';
       if (mem) sys += '\n你最近的记忆与对话上下文（来自 Roche 聊天）：\n' + mem + '\n';
       sys += '\n' + userDualNameLine(space) + '\n';
+      var relLine = relationNetLine(space);
+      if (relLine) sys += relLine + '\n';
       var prompts = getSpacePrompts(space);
       if (prompts.charPost) sys += '\n【发圈氛围提示（user 设定，请遵循）】' + prompts.charPost + '\n';
       if (ctx) sys += '\n你刚刚滑到的朋友圈动态和评论：\n' + ctx + '\n';
@@ -498,9 +552,12 @@
     return loadMountedMemory(sc).then(function (mem) {
       var sys = '你是「' + sc.charName + '」，正在看「' + (post.authorHandle || post.authorName) + '」的微信朋友圈。\n';
       if (persona) sys += '\n你的人设：\n' + persona + '\n';
+      if (sc.customIdentity) sys += '你在关系网中的身份：' + sc.customIdentity + '\n';
       var prompts = getSpacePrompts(space);
       if (prompts.charComment) sys += '\n【评论氛围提示（user 设定，请遵循）】' + prompts.charComment + '\n';
       if (mem) sys += '\n你最近的记忆上下文：\n' + mem + '\n';
+      var relLine = relationNetLine(space);
+      if (relLine) sys += relLine + '\n';
       sys += '\n这条朋友圈内容：\n' + (post.text || '(仅图片)') + '\n';
       sys += post.authorType === 'user' ? '发朋友圈的是 user（' + (space.userPersonaHandle || space.userPersonaName) + '）。\n' : '发朋友圈的是 ' + (post.authorHandle || post.authorName) + '（和你一样是 char）。\n';
       if (prevComments && prevComments.length) {
@@ -516,17 +573,27 @@
       sys += '<comment reply-to="被回复人名字">评论正文</comment>   （reply-to 可选，回复某人评论时填那人名字；不回复就省略整个 reply-to 属性。可输出多条）\n';
       sys += '<like>1</like> 或 <like>0</like>   （放末尾，1 表示顺便给这条朋友圈点赞，0 表示不点）\n';
       sys += '\n要求：第一人称「我」，符合人设口吻，每条 1-2 句，简短自然，不要 emoji/话题标签。@某人 用 @名字 形式写在评论正文里。';
+      sys += '\n注：reply-to 只能填上方「已有评论」里出现过的评论者名字；若只是评论朋友圈本身则必须省略 reply-to。user 未评论时绝对不能填 user 的名字。';
       return callAI({ messages: [{ role: 'system', content: sys }, { role: 'user', content: '写评论。' }], temperature: 0.9 });
     }).then(function (raw) {
       var p = parseCommentResponse(raw);
       var out = [];
+      // 构建 reply-to 白名单：只能回复已有评论中出现过的评论者
+      var replyWhitelist = {};
+      (prevComments || []).forEach(function (pc) {
+        if (pc.authorHandle) replyWhitelist[pc.authorHandle] = true;
+        if (pc.authorName) replyWhitelist[pc.authorName] = true;
+      });
       (p.comments || []).forEach(function (pc) {
+        // 校验模型输出的 replyToName：不在白名单则清空（防止幻觉编造评论者）
+        var modelRt = pc.replyToName || null;
+        if (modelRt && !replyWhitelist[modelRt]) modelRt = null;
         out.push({
           id: uuid(), postId: post.id, authorType: 'char', authorId: sc.charId,
           authorName: sc.charName, authorHandle: sc.charHandle || sc.charName,
           text: pc.text,
           replyTo: (mode === 'reply' && replyTarget && replyTarget.commentId) || null,
-          replyToName: (mode === 'reply' && replyTarget && replyTarget.name) || pc.replyToName || null,
+          replyToName: (mode === 'reply' && replyTarget && replyTarget.name) || modelRt || null,
           createdAt: Date.now()
         });
       });
@@ -543,6 +610,8 @@
     sys += '\n这条朋友圈内容：\n' + (post.text || '(仅图片)') + '\n';
     sys += '发朋友圈的是你的好友「' + (sc.charHandle || sc.charName) + '」。\n';
     sys += '\n' + userDualNameLine(space) + '\n';
+    var npcRelLine = relationNetLine(space);
+    if (npcRelLine) sys += npcRelLine + '\n';
     if (prevComments && prevComments.length) {
       sys += '\n已有评论（你可以看到）：\n';
       prevComments.forEach(function (pc) { sys += '- ' + (pc.authorHandle || pc.authorName) + '：' + pc.text + (pc.replyToName ? ' （回复 ' + pc.replyToName + '）' : '') + '\n'; });
@@ -642,6 +711,7 @@
         var persona = (c.persona || c.bio || sc.charPersona || '').slice(0, 400);
         sys += '【' + sc.charName + '】@' + (sc.charHandle || sc.charName) + '\n';
         if (persona) sys += '人设：' + persona + '\n';
+        if (sc.customIdentity) sys += '关系网身份：' + sc.customIdentity + '\n';
         var rp = recentByChar[sc.charId];
         if (rp) sys += '最近朋友圈：[' + formatStamp(rp.createdAt) + '] ' + ((rp.text || '(仅图片)').slice(0, 60)) + '\n';
         var mem = (mems[idx] || '').slice(0, 800);
@@ -649,6 +719,8 @@
         sys += '\n';
       });
       sys += '---\n' + userDualNameLine(space) + '\n\n';
+      var autoRelLine = relationNetLine(space);
+      if (autoRelLine) sys += autoRelLine + '\n\n';
       var mentionables = [];
       mentionables.push(space.userPersonaHandle || space.userPersonaName);
       (space.chars || []).forEach(function (ch) { if (ch.postEnabled || ch.commentEnabled) mentionables.push(ch.charHandle || ch.charName); });
@@ -668,6 +740,7 @@
       sys += '可输出多条，每条由不同 char 发出（author 必须是上面列出的 handle 之一）。\n';
       sys += '<like author="charHandle">1</like>   （放末尾，表示该 char 给这条朋友圈点赞；不点就不输出）\n';
       sys += '\n要求：每个 char 第一人称「我」，符合各自人设口吻，每条 1-2 句简短自然，不要 emoji/话题标签。@某人 用 @名字 形式写在评论正文里。';
+      sys += '\n注：reply-to 只能填上方「已有评论」里出现过的评论者名字；若只是评论朋友圈本身则必须省略 reply-to。user 未评论时绝对不能填 user 的名字。';
       return callAI({ messages: [{ role: 'system', content: sys }, { role: 'user', content: '让 char 们评论这条朋友圈。' }], temperature: 0.9 });
     }).then(function (raw) {
       var text = trim(raw || '');
@@ -693,12 +766,21 @@
       var handleMap = {};
       candidates.forEach(function (sc) { handleMap[sc.charHandle || sc.charName] = sc; handleMap[sc.charName] = sc; });
       var results = [];
+      // 构建 reply-to 白名单：只能回复已有评论中出现过的评论者
+      var replyWhitelist = {};
+      (post.comments || []).forEach(function (pc) {
+        if (pc.authorHandle) replyWhitelist[pc.authorHandle] = true;
+        if (pc.authorName) replyWhitelist[pc.authorName] = true;
+      });
       parsedComments.forEach(function (pc) {
         var sc = handleMap[pc.handle] || candidates[0];
+        // 校验 replyToName：不在白名单则清空（防止模型幻觉编造不存在的评论者）
+        var rt = pc.replyToName || null;
+        if (rt && !replyWhitelist[rt]) rt = null;
         results.push({
           id: uuid(), postId: post.id, authorType: 'char', authorId: sc.charId,
           authorName: sc.charName, authorHandle: sc.charHandle || sc.charName,
-          text: pc.text, replyTo: null, replyToName: pc.replyToName || null, createdAt: Date.now()
+          text: pc.text, replyTo: null, replyToName: rt, createdAt: Date.now()
         });
       });
       // 兜底：被 @ 的 char 必须评论
@@ -900,8 +982,35 @@
       var now = Date.now();
       var msg = { id: now + Math.floor(Math.random() * 1000), isMe: false, text: summary, senderId: sc.charId, timestamp: now, senderName: sc.charName, conversationId: convId };
       if (convId.slice(-8) === '_offline') msg.isStreaming = false;
-      return addMsgRecord(db, 'messages', msg).then(function () { db.close(); sc.lastSyncAt = now; Store.setSyncTs(space.id, sc.charId, now); Store.saveSpaces(); return { ok: true }; });
+      return addMsgRecord(db, 'messages', msg).then(function () {
+        db.close(); sc.lastSyncAt = now;
+        return Store.setSyncTs(space.id, sc.charId, now);
+      }).then(function () {
+        return Store.saveSpaces();
+      }).then(function () {
+        return { ok: true };
+      });
     }).catch(function (e) { return { ok: false, reason: (e && e.message) || 'DB 错误' }; });
+  }
+  // 实时批量注入：召唤评论/发圈后立即把新行为注入到对应 char 的单聊短期记忆
+  // charIds 去重后逐个调用 injectCharActionToChat，跳过未开 memSync 的 char
+  function injectCharsRealtime(space, charIds) {
+    if (!space || !charIds || !charIds.length) return Promise.resolve();
+    var seen = {}; var uniq = [];
+    charIds.forEach(function (cid) { if (!seen[cid]) { seen[cid] = true; uniq.push(cid); } });
+    var chain = Promise.resolve();
+    uniq.forEach(function (cid) {
+      var sc = getSpaceChar(space, cid);
+      if (!sc || !sc.memSync) return;
+      chain = chain.then(function () {
+        return injectCharActionToChat(space, sc).then(function (r) {
+          if (r && !r.ok && r.reason && r.reason.indexOf('DB') >= 0) {
+            console.warn('[Moments] realtime inject fail', sc.charName, r.reason);
+          }
+        });
+      });
+    });
+    return chain;
   }
   // 方式2：手动写事实记忆
   function syncCharToFactMemory(space, sc) {
@@ -1013,6 +1122,7 @@
     if (state.charListOpen) html += renderCharListModal(space);
     if (state.moodPromptsOpen) html += renderMoodPromptsModal(space);
     if (state.npcModalCharId) html += renderNpcModal(space, state.npcModalCharId);
+    if (state.relationNetOpen) html += renderRelationNetModal(space);
     if (state.uiPrefsOpen) html += renderUiPrefsModal();
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
@@ -1171,6 +1281,7 @@
     html += '<div class="moments-sb-item" data-action="toggle-dark"><div class="moments-sb-info"><div class="moments-sb-name">夜间模式</div><div class="moments-sb-sub">' + (state.darkMode ? '已开启' : '已关闭') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-uiprefs"><div class="moments-sb-info"><div class="moments-sb-name">界面尺寸调整</div><div class="moments-sb-sub">顶栏高度 · 底部安全边距</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-mood-prompts"><div class="moments-sb-info"><div class="moments-sb-name">氛围提示词</div><div class="moments-sb-sub">自定义发圈/评论氛围</div></div></div>';
+    html += '<div class="moments-sb-item" data-action="open-relation-net"><div class="moments-sb-info"><div class="moments-sb-name">关系网</div><div class="moments-sb-sub">user/char 身份 · char 间关系</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-subapi"><div class="moments-sb-info"><div class="moments-sb-name">副 API 设置</div><div class="moments-sb-sub">' + (getActiveSubApi() ? getActiveSubApi().name : '默认 roche.ai.chat') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="clear-img-cache"><div class="moments-sb-info"><div class="moments-sb-name">清除本地图片缓存</div></div></div>';
     html += '</div></div>';
@@ -1232,7 +1343,7 @@
 
   function renderMoodPromptsModal(space) {
     var cp = getSpacePrompts(space);
-    var html = '<div class="moments-modal-mask" data-action="close-mood-prompts"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">朋友圈氛围提示词</div><div class="moments-modal-x" data-action="close-mood-prompts">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    var html = '<div class="moments-modal-mask" data-action="close-mood-prompts"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">朋友圈氛围提示词 — ' + escapeHtml(space.userPersonaHandle || space.userPersonaName || '') + '</div><div class="moments-modal-x" data-action="close-mood-prompts">' + ICON.close + '</div></div><div class="moments-modal-bd">';
     html += '<div class="moments-hint">留空则不注入。只影响 AI 生成的氛围倾向，不改变输出格式。三栏分别对应：char 发朋友圈、char 评论、NPC 评论。</div>';
     html += '<div class="moments-mood-label">char 发朋友圈</div>';
     html += '<div class="moments-mood-hint">如：朋友圈少一点争吵，多一些日常分享 / 喜欢在朋友圈抬杠吐槽</div>';
@@ -1244,6 +1355,107 @@
     html += '<div class="moments-mood-hint">如：NPC 评论热闹一些，可以互相接梗 / NPC 安静围观为主</div>';
     html += '<textarea class="moments-mood-ta" data-field="mood-npcComment" placeholder="留空=不注入">' + escapeHtml(cp.npcComment) + '</textarea>';
     html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="close-mood-prompts">完成</button></div>';
+    return html + '</div></div></div>';
+  }
+
+  // 关系网 SVG 蛛网预览：user 居中，char 圆周均匀分布，char 间有向关系带箭头
+  function renderRelationNetSvg(space) {
+    var chars = (space.chars || []).slice();
+    var n = chars.length;
+    var cx = 200, cy = 200, r = 140;
+    // 计算每个 char 的坐标
+    var pos = {};
+    chars.forEach(function (sc, i) {
+      var angle = (2 * Math.PI * i / Math.max(n, 1)) - Math.PI / 2;
+      pos[sc.charId] = { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), name: sc.charName, handle: sc.charHandle || sc.charName };
+    });
+    var svg = '<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:380px;height:auto;display:block;margin:0 auto;">';
+    // defs：箭头 marker
+    svg += '<defs><marker id="relArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="rgb(255,92,92)"/></marker></defs>';
+    // user-char 绑定虚线
+    chars.forEach(function (sc) {
+      var p = pos[sc.charId];
+      svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + p.x.toFixed(1) + '" y2="' + p.y.toFixed(1) + '" stroke="rgb(200,200,200)" stroke-width="1" stroke-dasharray="3,3"/>';
+    });
+    // char-char 有向关系
+    (space.relations || []).forEach(function (rel) {
+      var from = pos[rel.fromCid], to = pos[rel.toCid];
+      if (!from || !to) return;
+      // 缩短线段避免箭头插入节点圆内
+      var dx = to.x - from.x, dy = to.y - from.y;
+      var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      var ux = dx / dist, uy = dy / dist;
+      var x1 = from.x + ux * 26, y1 = from.y + uy * 26;
+      var x2 = to.x - ux * 30, y2 = to.y - uy * 30;
+      svg += '<line x1="' + x1.toFixed(1) + '" y1="' + y1.toFixed(1) + '" x2="' + x2.toFixed(1) + '" y2="' + y2.toFixed(1) + '" stroke="rgb(255,92,92)" stroke-width="2" marker-end="url(#relArrow)"/>';
+      // 标签居中
+      var mx = (from.x + to.x) / 2, my = (from.y + to.y) / 2 - 6;
+      svg += '<text x="' + mx.toFixed(1) + '" y="' + my.toFixed(1) + '" text-anchor="middle" font-size="11" fill="rgb(255,92,92)">' + escapeHtml(rel.label || '') + '</text>';
+    });
+    // user 节点
+    var userLabel = (space.userIdentity || 'user').slice(0, 4);
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="30" fill="rgb(77,171,247)" stroke="white" stroke-width="2"/>';
+    svg += '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="13" fill="white" font-weight="bold">' + escapeHtml(userLabel) + '</text>';
+    // char 节点
+    chars.forEach(function (sc) {
+      var p = pos[sc.charId];
+      svg += '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="24" fill="rgb(255,169,77)" stroke="white" stroke-width="2"/>';
+      svg += '<text x="' + p.x.toFixed(1) + '" y="' + (p.y + 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="white" font-weight="bold">' + escapeHtml(p.name.slice(0, 2)) + '</text>';
+    });
+    svg += '</svg>';
+    return svg;
+  }
+
+  function renderRelationNetModal(space) {
+    var chars = (space.chars || []).slice();
+    var html = '<div class="moments-modal-mask" data-action="close-relation-net"><div class="moments-modal wide" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">关系网 — ' + escapeHtml(space.userPersonaHandle || space.userPersonaName || '') + '</div><div class="moments-modal-x" data-action="close-relation-net">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    // 蛛网预览
+    html += '<div class="moments-sec-title">蛛网预览</div>';
+    if (!chars.length) {
+      html += '<div class="moments-empty">尚未绑定任何 char，无法显示关系网</div>';
+    } else {
+      html += '<div class="moments-relation-svg">' + renderRelationNetSvg(space) + '</div>';
+    }
+    html += '<div class="moments-div"></div>';
+    // user 身份
+    html += '<div class="moments-sec-title">user 身份<span class="moments-sec-hint">设定你自己的身份信息</span></div>';
+    html += '<input class="moments-input" data-field="rel-user-identity" placeholder="如：公司老板 / 大学生 / 自由职业者" value="' + escapeHtml(space.userIdentity || '') + '">';
+    html += '<div class="moments-div"></div>';
+    // 各 char 身份
+    html += '<div class="moments-sec-title">char 身份<span class="moments-sec-hint">为每个绑定的 char 设定身份</span></div>';
+    if (!chars.length) {
+      html += '<div class="moments-empty">尚未绑定 char</div>';
+    } else {
+      chars.forEach(function (sc) {
+        html += '<div class="moments-row"><div class="moments-row-label">' + escapeHtml(sc.charName) + '</div>';
+        html += '<input class="moments-input" data-field="rel-char-identity" data-cid="' + escapeHtml(sc.charId) + '" placeholder="如：user 的徒弟 / 公司同事" value="' + escapeHtml(sc.customIdentity || '') + '"></div>';
+      });
+    }
+    html += '<div class="moments-div"></div>';
+    // char 间关系
+    html += '<div class="moments-sec-title">char 间关系<span class="moments-sec-hint">有向关系（A→B），如师父、恋人、死对头</span></div>';
+    var rels = space.relations || [];
+    if (rels.length) {
+      rels.forEach(function (rel) {
+        var fromName = charNameById(space, rel.fromCid);
+        var toName = charNameById(space, rel.toCid);
+        html += '<div class="moments-npc-item"><div class="moments-npc-item-info"><div class="moments-npc-item-name">' + escapeHtml(fromName) + ' → ' + escapeHtml(toName) + ' <span style="color:#999;font-weight:normal;">（' + escapeHtml(rel.label) + '）</span></div></div><button class="mm-btn danger" data-action="relation-del" data-rel-id="' + escapeHtml(rel.id) + '">删除</button></div>';
+      });
+    } else {
+      html += '<div class="moments-empty">尚未添加 char 间关系</div>';
+    }
+    // 添加关系表单
+    if (chars.length >= 2) {
+      html += '<div class="moments-div"></div><div class="moments-sec-title">添加关系</div>';
+      html += '<div class="moments-form"><label>从<select class="moments-input" id="rel-from">';
+      chars.forEach(function (sc) { html += '<option value="' + escapeHtml(sc.charId) + '">' + escapeHtml(sc.charName) + '</option>'; });
+      html += '</select></label><label>到<select class="moments-input" id="rel-to">';
+      chars.forEach(function (sc) { html += '<option value="' + escapeHtml(sc.charId) + '">' + escapeHtml(sc.charName) + '</option>'; });
+      html += '</select></label><label>关系标签<input class="moments-input" id="rel-label" placeholder="如：师父/恋人/死对头"></label><button class="moments-btn" data-action="relation-add">添加</button></div>';
+    } else if (chars.length < 2) {
+      html += '<div class="moments-hint">至少绑定 2 个 char 才能添加 char 间关系</div>';
+    }
+    html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="close-relation-net">完成</button></div>';
     return html + '</div></div></div>';
   }
 
@@ -1403,6 +1615,17 @@
       var sp0 = Store.getActiveSpace(); if (sp0) { sp0.customPrompts[field.replace('mood-', '')] = t.value; Store.saveSpaces(); }
       return;
     }
+    // 关系网：user 身份（space 级，无 cid）
+    if (field === 'rel-user-identity') {
+      var spR = Store.getActiveSpace(); if (spR) { spR.userIdentity = t.value; Store.saveSpaces(); }
+      return;
+    }
+    // 关系网：char 身份（char 级，有 cid）
+    if (field === 'rel-char-identity') {
+      var cidR = t.getAttribute('data-cid'); var spR2 = Store.getActiveSpace(); if (!spR2 || !cidR) return;
+      var scR = getSpaceChar(spR2, cidR); if (scR) { scR.customIdentity = t.value; Store.saveSpaces(); }
+      return;
+    }
     var cid = t.getAttribute('data-cid'); var conv = t.getAttribute('data-conv');
     var space = Store.getActiveSpace(); if (!space || !cid) return;
     var sc = getSpaceChar(space, cid); if (!sc) return;
@@ -1440,6 +1663,29 @@
 
       case 'open-mood-prompts': state.moodPromptsOpen = true; render(); break;
       case 'close-mood-prompts': state.moodPromptsOpen = false; render(); break;
+      case 'open-relation-net': state.relationNetOpen = true; render(); break;
+      case 'close-relation-net': state.relationNetOpen = false; render(); break;
+      case 'relation-add': {
+        if (!space) break;
+        var fromEl = $('#rel-from', root); var toEl = $('#rel-to', root); var labelEl = $('#rel-label', root);
+        if (!fromEl || !toEl || !labelEl) break;
+        var fromCid = trim(fromEl.value); var toCid = trim(toEl.value); var relLabel = trim(labelEl.value);
+        if (!fromCid || !toCid) { toast('请选择 char'); break; }
+        if (fromCid === toCid) { toast('不能指向自己'); break; }
+        if (!relLabel) { toast('请填关系标签'); break; }
+        if (!space.relations) space.relations = [];
+        space.relations.push({ id: 'rel_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6), fromCid: fromCid, toCid: toCid, label: relLabel });
+        Store.saveSpaces(); render();
+        break;
+      }
+      case 'relation-del': {
+        if (!space) break;
+        var relId = did(t, 'data-rel-id'); if (!relId) break;
+        if (!space.relations) break;
+        space.relations = space.relations.filter(function (r) { return r.id !== relId; });
+        Store.saveSpaces(); render();
+        break;
+      }
       case 'open-npc-modal': { var npcCid = did(t, 'data-cid'); state.npcModalCharId = npcCid; state.npcSuggestions = []; state.sidebarOpen = false; render(); break; }
       case 'close-npc-modal': state.npcModalCharId = null; render(); break;
       case 'npc-add': {
@@ -1535,7 +1781,7 @@
               // user @了谁，谁就必定被召唤
               var mentionedIds = detectMentionedCharsFromPost(space, post9);
               setTip('char 正在看这条动态...');
-              generateAutoComments(space, post9, DEFAULT_AUTO_COMMENT, mentionedIds).then(function () { setTip(null); if (root) render(); }).catch(function () { setTip(null); });
+              generateAutoComments(space, post9, DEFAULT_AUTO_COMMENT, mentionedIds).then(function (results) { setTip(null); if (root) render(); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); });
             }
           }
         });
@@ -1571,7 +1817,7 @@
         // user 在该动态下 @过的 char 必定被召唤
         var mentionedIdsS = detectMentionedCharsFromPost(space, postS);
         setTip('召唤 char 评论中...');
-        generateAutoComments(space, postS, DEFAULT_AUTO_COMMENT, mentionedIdsS).then(function () { setTip(null); toast('评论已生成'); if (root) render(); }).catch(function () { setTip(null); });
+        generateAutoComments(space, postS, DEFAULT_AUTO_COMMENT, mentionedIdsS).then(function (results) { setTip(null); toast('评论已生成'); if (root) render(); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); });
         break;
       }
       case 'view-photo': { /* URL/本地图直接显示，无需操作 */ break; }
@@ -1580,7 +1826,7 @@
         var subj3 = getCurrentSubject(); var canDelete = (subj3 && post6.authorId === subj3.id) || post6.authorType === 'char';
         var choice = window.prompt((canDelete ? '删除\n' : '') + '让 char 评论');
         if (choice === '删除' && canDelete) { confirmBox({ message: '删除这条朋友圈？' }).then(function (ok) { if (ok) Store.deletePost(pid6).then(render); }); }
-        else if (choice === '让 char 评论') { if (!space) break; var count = parseInt(window.prompt('让几个 char 评论？(1-8)', String(DEFAULT_AUTO_COMMENT)), 10) || DEFAULT_AUTO_COMMENT; setTip('生成评论中...'); generateAutoComments(space, post6, Math.min(Math.max(count, 1), MAX_AUTO_COMMENT)).then(function () { setTip(null); toast('评论已生成'); }).catch(function () { setTip(null); }); }
+        else if (choice === '让 char 评论') { if (!space) break; var count = parseInt(window.prompt('让几个 char 评论？(1-8)', String(DEFAULT_AUTO_COMMENT)), 10) || DEFAULT_AUTO_COMMENT; setTip('生成评论中...'); generateAutoComments(space, post6, Math.min(Math.max(count, 1), MAX_AUTO_COMMENT)).then(function (results) { setTip(null); toast('评论已生成'); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); }); }
         break;
       }
       case 'clear-img-cache': { confirmBox({ message: '清除朋友圈本地图片缓存？已发布的本地图片会失效。' }).then(function (ok) { if (ok) return cachedRoche.storage.set(KEYS.IMGCACHE, []); }).then(function () { toast('已清除'); }); break; }
@@ -1593,7 +1839,7 @@
         var txtEl = $('#moments-post-text', root); var text = txtEl ? trim(txtEl.value) : ''; var imgs = pendingImages.slice();
         if (!text && !imgs.length) { toast('请输入内容'); break; }
         var post7 = { id: uuid(), spaceId: space.id, authorType: subj4.type, authorId: subj4.id, authorName: subj4.realName || subj4.name, authorHandle: subj4.name, authorAvatar: subj4.avatar, text: text, images: imgs, location: '', createdAt: Date.now(), likes: [], comments: [] };
-        Store.addPost(post7).then(function () { state.postModalOpen = false; pendingImages = []; render(); if (subj4.type === 'user') { setTip('char 正在评论...'); generateAutoComments(space, post7, DEFAULT_AUTO_COMMENT).then(function () { setTip(null); }).catch(function () { setTip(null); }); } });
+        Store.addPost(post7).then(function () { state.postModalOpen = false; pendingImages = []; render(); if (subj4.type === 'user') { setTip('char 正在评论...'); generateAutoComments(space, post7, DEFAULT_AUTO_COMMENT).then(function (results) { setTip(null); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); }); } });
         break;
       }
       case 'open-notif-item': { var nid = did(t, 'data-id'); var nItem = null; for (var z = 0; z < state.notifs.length; z++) if (state.notifs[z].id === nid) { nItem = state.notifs[z]; break; } if (nItem) { nItem.read = true; Store.saveNotifs().then(function () { state.notifPanelOpen = false; render(); setTimeout(function () { var node = $('.moment[data-id="' + nItem.postId + '"]', root); if (node && node.scrollIntoView) node.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 50); }); } break; }
@@ -1783,6 +2029,7 @@
 + '.' + ROOT_CLASS + ' .moments-div{height:1px;background:#f0f0f0;margin:12px 0;}'
 + '.' + ROOT_CLASS + ' .moments-sec-title{font-size:14px;font-weight:600;margin-bottom:8px;}'
 + '.' + ROOT_CLASS + ' .moments-sec-hint{font-size:11px;color:#999;font-weight:400;margin-left:6px;}'
++ '.' + ROOT_CLASS + ' .moments-relation-svg{padding:10px;background:linear-gradient(135deg,#fafafa,#f0f0f0);border-radius:8px;margin-bottom:8px;}'
 + '.' + ROOT_CLASS + ' .moments-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;gap:12px;}'
 + '.' + ROOT_CLASS + ' .moments-row-label{font-size:14px;}'
 + '.' + ROOT_CLASS + ' .moments-input{border:1px solid #ddd;border-radius:6px;padding:6px 10px;font-size:14px;}'
@@ -1891,7 +2138,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.7.2',
+    version: '0.8.0',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
