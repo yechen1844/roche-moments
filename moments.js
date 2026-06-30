@@ -1,7 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.2
+ * Roche 朋友圈插件 v0.8.3
  * 完全拟真微信朋友圈的沉浸式模拟
- * v0.8.2: 朋友圈帖子可删除和编辑（操作气泡新增编辑/删除项，编辑弹窗复用发表结构预填原文+图片）；评论可删除（hover 出 X 按钮，触摸设备常驻显示）；清理旧 moment-more window.prompt 交互
+ * v0.8.3: 长按朋友圈弹出编辑/删除底部菜单；长按评论弹出删除底部菜单；操作气泡（···）仅保留赞/评论/召唤；移除评论 X 删除按钮，改为沉浸式长按交互
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -105,7 +105,7 @@
     activeSpaceId: null, currentSubject: 'user',
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
-    charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, darkMode: false, uiPrefsOpen: false,
+    charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, lpSheetOpen: false, lpTarget: null, darkMode: false, uiPrefsOpen: false,
     uiPrefs: { topbarH: 44, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
@@ -115,6 +115,10 @@
     allChars: [], allPersonas: [], activePersona: null
   };
   var pendingImages = [];
+  var _lpTimer = null;
+  var _lpFired = false;
+  var _lpStartX = 0;
+  var _lpStartY = 0;
 
   // ========== Store ==========
   var Store = {
@@ -1224,6 +1228,7 @@
     if (state.editModalOpen) html += renderEditPostModal(space);
     if (state.notifPanelOpen) html += renderNotifPanel(space);
     if (state.subjectSheetOpen) html += renderSubjectSheet(space);
+    if (state.lpSheetOpen) html += renderLpSheet();
     if (state.memMountCharId) html += renderMemMountModal(space, state.memMountCharId);
     if (state.subApiPanelOpen) html += renderSubApiPanel();
     if (state.charListOpen) html += renderCharListModal(space);
@@ -1245,8 +1250,6 @@
       var tgt = $('.moment[data-id="' + state.commentTarget.postId + '"] .moment-acts', root);
       if (tgt) tgt.scrollIntoView({ block: 'nearest' });
     }
-    // 触摸设备常驻显示评论删除按钮
-    if ('ontouchstart' in window) { $all('.mc-del', root).forEach(function (d) { d.classList.add('show'); }); }
   }
 
   // 顶栏：黑底白字微信风格
@@ -1343,7 +1346,7 @@
       h += '<div class="moment-comments">';
       (p.comments || []).forEach(function (c) {
         var cn = c.authorHandle || c.authorName;
-        h += '<div class="mc" data-action="reply-comment" data-id="' + p.id + '" data-cid="' + c.id + '"><span class="mc-del" data-action="delete-comment" data-id="' + p.id + '" data-cid="' + c.id + '">' + ICON.close + '</span>';
+        h += '<div class="mc" data-action="reply-comment" data-id="' + p.id + '" data-cid="' + c.id + '">';
         h += '<span class="mc-n">' + escapeHtml(cn) + '</span>';
         if (c.replyToName) h += '<span class="mc-r"> 回复 </span><span class="mc-n">' + escapeHtml(c.replyToName) + '</span>';
         // 渲染评论正文（高亮 @提及）
@@ -1701,6 +1704,22 @@
     return html + '</div></div>';
   }
 
+  function renderLpSheet() {
+    var lp = state.lpTarget;
+    if (!lp) return '';
+    var html = '<div class="moments-modal-mask" data-action="close-lp-sheet"><div class="moments-sheet" data-stop="1">';
+    if (lp.type === 'post') {
+      html += '<div class="moments-sheet-title">朋友圈操作</div>';
+      html += '<div class="moments-sheet-item" data-action="lp-edit-post" data-id="' + escapeHtml(lp.postId) + '">' + ICON.edit + '<span>编辑</span></div>';
+      html += '<div class="moments-sheet-item danger" data-action="lp-delete-post" data-id="' + escapeHtml(lp.postId) + '">' + ICON.del + '<span>删除</span></div>';
+    } else if (lp.type === 'comment') {
+      html += '<div class="moments-sheet-title">评论操作</div>';
+      html += '<div class="moments-sheet-item danger" data-action="lp-delete-comment" data-id="' + escapeHtml(lp.postId) + '" data-cid="' + escapeHtml(lp.commentId) + '">' + ICON.del + '<span>删除评论</span></div>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
   function renderNotifPanel(space) {
     var html = '<div class="moments-modal-mask" data-action="close-notif"><div class="moments-modal" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">消息通知</div><div class="moments-modal-x" data-action="close-notif">' + ICON.close + '</div></div><div class="moments-modal-bd">';
     var list = state.notifs.filter(function (n) { return !space || n.spaceId === space.id; });
@@ -1712,6 +1731,76 @@
     return html + '</div></div></div>';
   }
 
+  // ========== 长按检测 ==========
+  var LP_DELAY = 500;
+  var LP_MOVE_THRESHOLD = 10;
+
+  function findLpAnchor(el) {
+    while (el && el !== root) {
+      if (el.getAttribute) {
+        if (el.getAttribute('data-action') === 'open-acts') return null;
+        if (el.getAttribute('data-action') === 'view-photo') return null;
+        if (el.getAttribute('data-action') === 'toggle-text') return null;
+        if (el.classList && el.classList.contains('moment-avatar')) return null;
+        if (el.getAttribute('data-action') === 'view-author') return null;
+        if (el.classList && el.classList.contains('moment-act-pop')) return null;
+        if (el.classList && el.classList.contains('mc')) {
+          var cid = el.getAttribute('data-cid');
+          var pid = el.getAttribute('data-id');
+          if (cid && pid) return { type: 'comment', postId: pid, commentId: cid, anchor: el };
+        }
+        if (el.classList && el.classList.contains('moment')) {
+          var mid = el.getAttribute('data-id');
+          if (mid) return { type: 'post', postId: mid, anchor: el };
+        }
+      }
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  function onLpStart(e) {
+    _lpFired = false;
+    _lpTimer = null;
+    var touch = e.touches ? e.touches[0] : e;
+    _lpStartX = touch.clientX;
+    _lpStartY = touch.clientY;
+    var target = e.target;
+    var lpInfo = findLpAnchor(target);
+    if (!lpInfo) return;
+    _lpTimer = setTimeout(function () {
+      _lpFired = true;
+      _lpTimer = null;
+      if (lpInfo.anchor) {
+        lpInfo.anchor.classList.add('lp-active');
+        setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
+      }
+      state.lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
+      state.lpSheetOpen = true;
+      render();
+      if (e.cancelable) e.preventDefault();
+    }, LP_DELAY);
+  }
+
+  function onLpEnd() {
+    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    if (_lpFired) { setTimeout(function () { _lpFired = false; }, 400); }
+  }
+
+  function onLpMove(e) {
+    if (!_lpTimer) return;
+    var touch = e.touches ? e.touches[0] : e;
+    var dx = touch.clientX - _lpStartX;
+    var dy = touch.clientY - _lpStartY;
+    if (dx * dx + dy * dy > LP_MOVE_THRESHOLD * LP_MOVE_THRESHOLD) {
+      clearTimeout(_lpTimer); _lpTimer = null;
+    }
+  }
+
+  function onLpCancel() {
+    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+  }
+
   // ========== 事件 ==========
   function bindEvents() {
     if (!root) return;
@@ -1719,6 +1808,12 @@
     root.addEventListener('dblclick', onRootDblClick);
     root.addEventListener('change', onRootChange);
     root.addEventListener('input', onRootChange);
+    root.addEventListener('touchstart', onLpStart, { passive: false });
+    root.addEventListener('touchend', onLpEnd);
+    root.addEventListener('touchmove', onLpMove, { passive: true });
+    root.addEventListener('mousedown', onLpStart);
+    root.addEventListener('mouseup', onLpEnd);
+    root.addEventListener('mouseleave', onLpCancel);
   }
   function closestEl(el, attr, val) {
     while (el && el !== root) {
@@ -1738,6 +1833,7 @@
     if (dbl === 'open-sidebar') { state.sidebarOpen = true; render(); }
   }
   function onRootClick(e) {
+    if (_lpFired) { _lpFired = false; e.stopPropagation(); e.preventDefault(); return; }
     var t = e.target;
     // 文字图点击：直接 toggle class，不 render
     var textToggle = closestEl(t, 'data-action', 'toggle-text');
@@ -1837,6 +1933,7 @@
       case 'open-post-modal': pendingImages = []; state.postModalOpen = true; render(); break;
       case 'close-post-modal': state.postModalOpen = false; pendingImages = []; render(); break;
       case 'close-edit-modal': state.editModalOpen = false; state.editPostId = null; pendingImages = []; render(); break;
+      case 'close-lp-sheet': state.lpSheetOpen = false; state.lpTarget = null; render(); break;
       case 'open-subapi': state.subApiPanelOpen = true; render(); break;
       case 'close-subapi': state.subApiPanelOpen = false; render(); break;
       case 'open-char-list': state.charListOpen = true; render(); break;
@@ -1996,7 +2093,7 @@
             pop.innerHTML = '';
           } else {
             pop.classList.add('open');
-            pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div><div class="moment-act-pop-i subtle" data-action="summon-comments" data-id="' + pid5 + '">' + ICON.more + '召唤</div><div class="moment-act-pop-i" data-action="edit-post" data-id="' + pid5 + '">' + ICON.edit + '编辑</div><div class="moment-act-pop-i danger" data-action="delete-post" data-id="' + pid5 + '">' + ICON.del + '删除</div>';
+            pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div><div class="moment-act-pop-i subtle" data-action="summon-comments" data-id="' + pid5 + '">' + ICON.more + '召唤</div>';
           }
         }
         break;
@@ -2031,6 +2128,30 @@
         if (!pidCm || !cidCm) break;
         confirmBox({ message: '删除这条评论？' }).then(function (ok) {
           if (ok) Store.deleteComment(pidCm, cidCm).then(function () { toast('已删除'); render(); });
+        }); break;
+      }
+      case 'lp-edit-post': {
+        var pidLpE = did(t, 'data-id'); var postLpE = null;
+        for (var le = 0; le < state.posts.length; le++) { if (state.posts[le].id === pidLpE) { postLpE = state.posts[le]; break; } }
+        if (!postLpE) break;
+        state.lpSheetOpen = false; state.lpTarget = null;
+        state.editPostId = pidLpE; state.editModalOpen = true;
+        pendingImages = (postLpE.images || []).slice();
+        render(); break;
+      }
+      case 'lp-delete-post': {
+        var pidLpD = did(t, 'data-id');
+        state.lpSheetOpen = false; state.lpTarget = null;
+        confirmBox({ message: '删除这条朋友圈？' }).then(function (ok) {
+          if (ok) Store.deletePost(pidLpD).then(function () { toast('已删除'); render(); });
+        }); break;
+      }
+      case 'lp-delete-comment': {
+        var pidLpC = did(t, 'data-id'); var cidLpC = did(t, 'data-cid');
+        state.lpSheetOpen = false; state.lpTarget = null;
+        if (!pidLpC || !cidLpC) break;
+        confirmBox({ message: '删除这条评论？' }).then(function (ok) {
+          if (ok) Store.deleteComment(pidLpC, cidLpC).then(function () { toast('已删除'); render(); });
         }); break;
       }
       case 'clear-img-cache': { confirmBox({ message: '清除朋友圈本地图片缓存？已发布的本地图片会失效。' }).then(function (ok) { if (ok) return cachedRoche.storage.set(KEYS.IMGCACHE, []); }).then(function () { toast('已清除'); }); break; }
@@ -2193,14 +2314,14 @@
 + '.' + ROOT_CLASS + ' .moment-likes{display:flex;align-items:flex-start;gap:5px;color:#576B95;font-size:13px;padding:3px 0;border-bottom:1px solid #eee;}'
 + '.' + ROOT_CLASS + ' .moment-likes svg{flex-shrink:0;margin-top:2px;}'
 + '.' + ROOT_CLASS + ' .moment-comments{padding-top:3px;}'
-+ '.' + ROOT_CLASS + ' .moment-comments .mc{font-size:13px;line-height:1.7;color:#353535;cursor:pointer;position:relative;padding-right:18px;}'
++ '.' + ROOT_CLASS + ' .moment-comments .mc{font-size:13px;line-height:1.7;color:#353535;cursor:pointer;position:relative;}'
 + '.' + ROOT_CLASS + ' .mc-n{color:#576B95;font-weight:600;}'
 + '.' + ROOT_CLASS + ' .mc-r{color:#999;}'
 + '.' + ROOT_CLASS + ' .mc-c{color:#353535;}'
 + '.' + ROOT_CLASS + ' .mc-at{color:#576B95;font-weight:500;}'
-+ '.' + ROOT_CLASS + ' .mc-del{position:absolute;right:0;top:50%;transform:translateY(-50%);width:16px;height:16px;display:none;align-items:center;justify-content:center;cursor:pointer;color:#ccc;border-radius:50%;}'
-+ '.' + ROOT_CLASS + ' .mc-del:hover{color:#FA5151;}'
-+ '.' + ROOT_CLASS + ' .mc:hover .mc-del,.' + ROOT_CLASS + ' .mc-del.show{display:flex;}'
+// 长按反馈
++ '.' + ROOT_CLASS + ' .moment.lp-active{background:#f0f0f0;transition:background 0.15s;}'
++ '.' + ROOT_CLASS + ' .mc.lp-active{background:rgba(87,107,149,0.08);border-radius:4px;transition:background 0.15s;}'
 // 空状态
 + '.' + ROOT_CLASS + ' .moments-feed-empty{padding:90px 20px;text-align:center;color:#999;}'
 + '.' + ROOT_CLASS + ' .moments-feed-empty svg{color:#bbb;margin-bottom:12px;}'
@@ -2353,9 +2474,13 @@
 + '.' + ROOT_CLASS + '.dark .moments-modal-mask{background:rgba(0,0,0,0.65);}'
 + '.' + ROOT_CLASS + '.dark .moments-sb-sub,.' + ROOT_CLASS + '.dark .moments-sb-label,.' + ROOT_CLASS + '.dark .moments-hint,.' + ROOT_CLASS + '.dark .moments-empty,.' + ROOT_CLASS + '.dark .moments-boot-text,.' + ROOT_CLASS + '.dark .moments-mood-hint{color:#888;}'
 + '.' + ROOT_CLASS + '.dark .moments-cover-ph{color:rgba(255,255,255,0.45);}'
-+ '.' + ROOT_CLASS + '.dark .mc-del{color:#555;}'
-+ '.' + ROOT_CLASS + '.dark .mc-del:hover{color:#FA5151;}'
-+ '.' + ROOT_CLASS + '.dark .moment-act-pop-i.danger{color:#FF6B6B;}';
++ '.' + ROOT_CLASS + '.dark .moment.lp-active{background:#2A2A2A;}'
++ '.' + ROOT_CLASS + '.dark .mc.lp-active{background:rgba(255,255,255,0.06);}'
++ '.' + ROOT_CLASS + '.dark .moment-act-pop-i.danger{color:#FF6B6B;}'
++ '.' + ROOT_CLASS + ' .moments-sheet-item.danger{color:#FA5151;}'
++ '.' + ROOT_CLASS + ' .moments-sheet-item.danger svg{color:#FA5151;}'
++ '.' + ROOT_CLASS + '.dark .moments-sheet-item.danger{color:#FF6B6B;}'
++ '.' + ROOT_CLASS + '.dark .moments-sheet-item.danger svg{color:#FF6B6B;}';
 
   // ========== 插件注册 ==========
   window.RochePlugin = window.RochePlugin || {};
@@ -2363,7 +2488,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.2',
+    version: '0.8.3',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2410,6 +2535,12 @@
           root.removeEventListener('click', onRootClick);
           root.removeEventListener('dblclick', onRootDblClick);
           root.removeEventListener('change', onRootChange);
+          root.removeEventListener('touchstart', onLpStart);
+          root.removeEventListener('touchend', onLpEnd);
+          root.removeEventListener('touchmove', onLpMove);
+          root.removeEventListener('mousedown', onLpStart);
+          root.removeEventListener('mouseup', onLpEnd);
+          root.removeEventListener('mouseleave', onLpCancel);
         }
         pendingImages = [];
         if (container) container.replaceChildren();
