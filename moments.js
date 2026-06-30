@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.1
+ * Roche 朋友圈插件 v0.8.2
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.8.2: 朋友圈帖子可删除和编辑（操作气泡新增编辑/删除项，编辑弹窗复用发表结构预填原文+图片）；评论可删除（hover 出 X 按钮，触摸设备常驻显示）；清理旧 moment-more window.prompt 交互
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -54,7 +55,9 @@
     menu: '<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>',
     plus: '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z"/></svg>',
     image: '<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 4h18v16H3V4zm2 12l4-4 3 3 4-5 3 4V6H5v10zm3-7a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/></svg>',
-    location: '<svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7zm0 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>'
+    location: '<svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7zm0 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>',
+    del: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>'
   };
 
   // ========== 工具函数 ==========
@@ -102,7 +105,7 @@
     activeSpaceId: null, currentSubject: 'user',
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
-    charListOpen: false, commentTarget: null, darkMode: false, uiPrefsOpen: false,
+    charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, darkMode: false, uiPrefsOpen: false,
     uiPrefs: { topbarH: 44, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
@@ -148,10 +151,30 @@
     },
     addPost: function (p) { state.posts.push(p); state.posts.sort(function (a, b) { return b.createdAt - a.createdAt; }); return Store.savePosts(); },
     deletePost: function (id) { state.posts = state.posts.filter(function (p) { return p.id !== id; }); return Store.savePosts(); },
+    updatePost: function (id, updates) {
+      for (var i = 0; i < state.posts.length; i++) {
+        if (state.posts[i].id === id) {
+          for (var k in updates) { if (updates.hasOwnProperty(k)) state.posts[i][k] = updates[k]; }
+          break;
+        }
+      }
+      return Store.savePosts();
+    },
     addComment: function (pid, c) {
       for (var i = 0; i < state.posts.length; i++) if (state.posts[i].id === pid) {
         if (!state.posts[i].comments) state.posts[i].comments = [];
         state.posts[i].comments.push(c); break;
+      }
+      return Store.savePosts();
+    },
+    deleteComment: function (postId, commentId) {
+      for (var i = 0; i < state.posts.length; i++) {
+        if (state.posts[i].id === postId) {
+          if (state.posts[i].comments) {
+            state.posts[i].comments = state.posts[i].comments.filter(function (c) { return c.id !== commentId; });
+          }
+          break;
+        }
       }
       return Store.savePosts();
     },
@@ -1198,6 +1221,7 @@
     // 浮层（与滚动区同级，覆盖整个 root）
     if (state.sidebarOpen) html += renderSidebar(space);
     if (state.postModalOpen) html += renderPostModal(space);
+    if (state.editModalOpen) html += renderEditPostModal(space);
     if (state.notifPanelOpen) html += renderNotifPanel(space);
     if (state.subjectSheetOpen) html += renderSubjectSheet(space);
     if (state.memMountCharId) html += renderMemMountModal(space, state.memMountCharId);
@@ -1215,11 +1239,14 @@
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
     if (state.postModalOpen) setupPostModalTools();
+    if (state.editModalOpen) { setupPostModalTools(); refreshPostImages(); }
     // 评论输入框出现时，把目标帖子滚到可见区域（避免被输入栏遮挡）
     if (state.commentTarget) {
       var tgt = $('.moment[data-id="' + state.commentTarget.postId + '"] .moment-acts', root);
       if (tgt) tgt.scrollIntoView({ block: 'nearest' });
     }
+    // 触摸设备常驻显示评论删除按钮
+    if ('ontouchstart' in window) { $all('.mc-del', root).forEach(function (d) { d.classList.add('show'); }); }
   }
 
   // 顶栏：黑底白字微信风格
@@ -1316,7 +1343,7 @@
       h += '<div class="moment-comments">';
       (p.comments || []).forEach(function (c) {
         var cn = c.authorHandle || c.authorName;
-        h += '<div class="mc" data-action="reply-comment" data-id="' + p.id + '" data-cid="' + c.id + '">';
+        h += '<div class="mc" data-action="reply-comment" data-id="' + p.id + '" data-cid="' + c.id + '"><span class="mc-del" data-action="delete-comment" data-id="' + p.id + '" data-cid="' + c.id + '">' + ICON.close + '</span>';
         h += '<span class="mc-n">' + escapeHtml(cn) + '</span>';
         if (c.replyToName) h += '<span class="mc-r"> 回复 </span><span class="mc-n">' + escapeHtml(c.replyToName) + '</span>';
         // 渲染评论正文（高亮 @提及）
@@ -1624,6 +1651,21 @@
       '<div class="moments-btn-row"><button class="moments-btn" data-action="publish-post">发表</button></div></div></div></div>';
   }
 
+  function renderEditPostModal(space) {
+    var post = null;
+    for (var i = 0; i < state.posts.length; i++) {
+      if (state.posts[i].id === state.editPostId) { post = state.posts[i]; break; }
+    }
+    if (!post) return '';
+    var name = post.authorHandle || post.authorName;
+    return '<div class="moments-modal-mask" data-action="close-edit-modal"><div class="moments-modal" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">编辑</div><div class="moments-modal-x" data-action="close-edit-modal">' + ICON.close + '</div></div><div class="moments-modal-bd">' +
+      '<div class="moments-post-as">以 <b>' + escapeHtml(name) + '</b> 编辑</div>' +
+      '<textarea class="moments-post-text" id="moments-post-text">' + escapeHtml(post.text || '') + '</textarea>' +
+      '<div class="moments-post-imgs" id="moments-post-imgs"></div>' +
+      '<div class="moments-post-tools"><span class="mp-tool" data-tool="text">' + ICON.image + '<span>文字图</span></span><span class="mp-tool" data-tool="url">' + ICON.image + '<span>图片URL</span></span><label class="mp-tool" data-tool="file">' + ICON.image + '<span>本地图片</span><input type="file" accept="image/*" id="moments-post-file" style="display:none"></label></div>' +
+      '<div class="moments-btn-row"><button class="moments-btn" data-action="save-edit-post">保存</button></div></div></div></div>';
+  }
+
   function renderUiPrefsModal() {
     var tb = state.uiPrefs.topbarH || 44;
     var bp = state.uiPrefs.bottomPad || 80;
@@ -1794,6 +1836,7 @@
       case 'set-subject': state.currentSubject = did(t, 'data-sub'); state.subjectSheetOpen = false; state._suppressScrollRestore = true; render(); break;
       case 'open-post-modal': pendingImages = []; state.postModalOpen = true; render(); break;
       case 'close-post-modal': state.postModalOpen = false; pendingImages = []; render(); break;
+      case 'close-edit-modal': state.editModalOpen = false; state.editPostId = null; pendingImages = []; render(); break;
       case 'open-subapi': state.subApiPanelOpen = true; render(); break;
       case 'close-subapi': state.subApiPanelOpen = false; render(); break;
       case 'open-char-list': state.charListOpen = true; render(); break;
@@ -1953,7 +1996,7 @@
             pop.innerHTML = '';
           } else {
             pop.classList.add('open');
-            pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div><div class="moment-act-pop-i subtle" data-action="summon-comments" data-id="' + pid5 + '">' + ICON.more + '召唤</div>';
+            pop.innerHTML = '<div class="moment-act-pop-i" data-action="like" data-id="' + pid5 + '">' + ICON.like + '赞</div><div class="moment-act-pop-i" data-action="comment-post" data-id="' + pid5 + '">' + ICON.comment + '评论</div><div class="moment-act-pop-i subtle" data-action="summon-comments" data-id="' + pid5 + '">' + ICON.more + '召唤</div><div class="moment-act-pop-i" data-action="edit-post" data-id="' + pid5 + '">' + ICON.edit + '编辑</div><div class="moment-act-pop-i danger" data-action="delete-post" data-id="' + pid5 + '">' + ICON.del + '删除</div>';
           }
         }
         break;
@@ -1969,13 +2012,26 @@
         break;
       }
       case 'view-photo': { /* URL/本地图直接显示，无需操作 */ break; }
-      case 'moment-more': {
-        var pid6 = did(t, 'data-id'); var post6 = null; for (var y = 0; y < state.posts.length; y++) if (state.posts[y].id === pid6) { post6 = state.posts[y]; break; } if (!post6) break;
-        var subj3 = getCurrentSubject(); var canDelete = (subj3 && post6.authorId === subj3.id) || post6.authorType === 'char';
-        var choice = window.prompt((canDelete ? '删除\n' : '') + '让 char 评论');
-        if (choice === '删除' && canDelete) { confirmBox({ message: '删除这条朋友圈？' }).then(function (ok) { if (ok) Store.deletePost(pid6).then(render); }); }
-        else if (choice === '让 char 评论') { if (!space) break; var count = parseInt(window.prompt('让几个 char 评论？(1-8)', String(DEFAULT_AUTO_COMMENT)), 10) || DEFAULT_AUTO_COMMENT; setTip('生成评论中...'); generateAutoComments(space, post6, Math.min(Math.max(count, 1), MAX_AUTO_COMMENT)).then(function (results) { setTip(null); toast('评论已生成'); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); }); }
-        break;
+      case 'edit-post': {
+        var pidE = did(t, 'data-id'); var postE = null;
+        for (var e = 0; e < state.posts.length; e++) { if (state.posts[e].id === pidE) { postE = state.posts[e]; break; } }
+        if (!postE) break;
+        state.editPostId = pidE; state.editModalOpen = true;
+        pendingImages = (postE.images || []).slice();
+        render(); break;
+      }
+      case 'delete-post': {
+        var pidDel = did(t, 'data-id');
+        confirmBox({ message: '删除这条朋友圈？' }).then(function (ok) {
+          if (ok) Store.deletePost(pidDel).then(function () { toast('已删除'); render(); });
+        }); break;
+      }
+      case 'delete-comment': {
+        var pidCm = did(t, 'data-id'); var cidCm = did(t, 'data-cid');
+        if (!pidCm || !cidCm) break;
+        confirmBox({ message: '删除这条评论？' }).then(function (ok) {
+          if (ok) Store.deleteComment(pidCm, cidCm).then(function () { toast('已删除'); render(); });
+        }); break;
       }
       case 'clear-img-cache': { confirmBox({ message: '清除朋友圈本地图片缓存？已发布的本地图片会失效。' }).then(function (ok) { if (ok) return cachedRoche.storage.set(KEYS.IMGCACHE, []); }).then(function () { toast('已清除'); }); break; }
       case 'enable-subapi': { var sid = did(t, 'data-id'); state.subapi.forEach(function (p) { p.enabled = (p.id === sid); }); Store.saveSubApi().then(render); break; }
@@ -1989,6 +2045,16 @@
         var post7 = { id: uuid(), spaceId: space.id, authorType: subj4.type, authorId: subj4.id, authorName: subj4.realName || subj4.name, authorHandle: subj4.name, authorAvatar: subj4.avatar, text: text, images: imgs, location: '', createdAt: Date.now(), likes: [], comments: [] };
         Store.addPost(post7).then(function () { state.postModalOpen = false; pendingImages = []; render(); if (subj4.type === 'user') { setTip('char 正在评论...'); generateAutoComments(space, post7, DEFAULT_AUTO_COMMENT).then(function (results) { setTip(null); return injectCharsRealtime(space, (results || []).map(function (r) { return r.authorId; })); }).catch(function () { setTip(null); }); } });
         break;
+      }
+      case 'save-edit-post': {
+        var pidSave = state.editPostId; if (!pidSave) break;
+        var txtSave = $('#moments-post-text', root); var textSave = txtSave ? trim(txtSave.value) : '';
+        var imgsSave = pendingImages.slice();
+        if (!textSave && !imgsSave.length) { toast('请输入内容'); break; }
+        Store.updatePost(pidSave, { text: textSave, images: imgsSave }).then(function () {
+          state.editModalOpen = false; state.editPostId = null; pendingImages = [];
+          toast('已保存'); render();
+        }); break;
       }
       case 'open-notif-item': { var nid = did(t, 'data-id'); var nItem = null; for (var z = 0; z < state.notifs.length; z++) if (state.notifs[z].id === nid) { nItem = state.notifs[z]; break; } if (nItem) { nItem.read = true; Store.saveNotifs().then(function () { state.notifPanelOpen = false; render(); setTimeout(function () { var node = $('.moment[data-id="' + nItem.postId + '"]', root); if (node && node.scrollIntoView) node.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 50); }); } break; }
     }
@@ -2120,17 +2186,21 @@
 + '.' + ROOT_CLASS + ' .moment-act-pop.open::after{content:"";position:absolute;right:-6px;top:50%;transform:translateY(-50%);border:6px solid transparent;border-left-color:#4c4c4c;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop-i{display:flex;align-items:center;gap:4px;color:#fff;font-size:13px;padding:8px 14px;cursor:pointer;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop-i.subtle{color:rgba(255,255,255,0.6);font-size:12px;}'
++ '.' + ROOT_CLASS + ' .moment-act-pop-i.danger{color:#FA5151;}'
 + '.' + ROOT_CLASS + ' .moment-act-pop-i:not(:last-child){border-right:1px solid rgba(255,255,255,0.2);}'
 // 互动区
 + '.' + ROOT_CLASS + ' .moment-int{background:#f7f7f7;border-radius:4px;padding:6px 10px;margin-top:6px;position:relative;}'
 + '.' + ROOT_CLASS + ' .moment-likes{display:flex;align-items:flex-start;gap:5px;color:#576B95;font-size:13px;padding:3px 0;border-bottom:1px solid #eee;}'
 + '.' + ROOT_CLASS + ' .moment-likes svg{flex-shrink:0;margin-top:2px;}'
 + '.' + ROOT_CLASS + ' .moment-comments{padding-top:3px;}'
-+ '.' + ROOT_CLASS + ' .moment-comments .mc{font-size:13px;line-height:1.7;color:#353535;cursor:pointer;}'
++ '.' + ROOT_CLASS + ' .moment-comments .mc{font-size:13px;line-height:1.7;color:#353535;cursor:pointer;position:relative;padding-right:18px;}'
 + '.' + ROOT_CLASS + ' .mc-n{color:#576B95;font-weight:600;}'
 + '.' + ROOT_CLASS + ' .mc-r{color:#999;}'
 + '.' + ROOT_CLASS + ' .mc-c{color:#353535;}'
 + '.' + ROOT_CLASS + ' .mc-at{color:#576B95;font-weight:500;}'
++ '.' + ROOT_CLASS + ' .mc-del{position:absolute;right:0;top:50%;transform:translateY(-50%);width:16px;height:16px;display:none;align-items:center;justify-content:center;cursor:pointer;color:#ccc;border-radius:50%;}'
++ '.' + ROOT_CLASS + ' .mc-del:hover{color:#FA5151;}'
++ '.' + ROOT_CLASS + ' .mc:hover .mc-del,.' + ROOT_CLASS + ' .mc-del.show{display:flex;}'
 // 空状态
 + '.' + ROOT_CLASS + ' .moments-feed-empty{padding:90px 20px;text-align:center;color:#999;}'
 + '.' + ROOT_CLASS + ' .moments-feed-empty svg{color:#bbb;margin-bottom:12px;}'
@@ -2282,7 +2352,10 @@
 + '.' + ROOT_CLASS + '.dark .moments-npc-suggest{background:#1E2433;border-color:#3a4a6a;}'
 + '.' + ROOT_CLASS + '.dark .moments-modal-mask{background:rgba(0,0,0,0.65);}'
 + '.' + ROOT_CLASS + '.dark .moments-sb-sub,.' + ROOT_CLASS + '.dark .moments-sb-label,.' + ROOT_CLASS + '.dark .moments-hint,.' + ROOT_CLASS + '.dark .moments-empty,.' + ROOT_CLASS + '.dark .moments-boot-text,.' + ROOT_CLASS + '.dark .moments-mood-hint{color:#888;}'
-+ '.' + ROOT_CLASS + '.dark .moments-cover-ph{color:rgba(255,255,255,0.45);}';
++ '.' + ROOT_CLASS + '.dark .moments-cover-ph{color:rgba(255,255,255,0.45);}'
++ '.' + ROOT_CLASS + '.dark .mc-del{color:#555;}'
++ '.' + ROOT_CLASS + '.dark .mc-del:hover{color:#FA5151;}'
++ '.' + ROOT_CLASS + '.dark .moment-act-pop-i.danger{color:#FF6B6B;}';
 
   // ========== 插件注册 ==========
   window.RochePlugin = window.RochePlugin || {};
@@ -2290,7 +2363,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.1',
+    version: '0.8.2',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
