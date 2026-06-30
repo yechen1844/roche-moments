@@ -1,6 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.7.0
+ * Roche 朋友圈插件 v0.7.1
  * 完全拟真微信朋友圈的沉浸式模拟
+ * v0.7.1: 顶栏"朋友圈"水平居中；侧边栏界面尺寸调整面板（顶栏高度+底部安全边距滑块实时预览，自动保存，全屏通用）；评论态滚动区底部让出输入栏高度防遮挡
  * v0.7: 召唤评论批量模型决策（人设+最近朋友圈+绑定记忆）；user双名字认知；buildActionSummary 5分类（新增②别人在我朋友圈互动+⑤别人@我）；心形点赞图标；封面图per-char/per-user；夜间模式；拆分enabled(发圈+评论)与memSync(记忆注入)
  * v0.6: 记忆/上下文加时间标签；氛围提示词（发圈/评论/NPC）；per-char NPC 系统（手动+AI生成）；buildActionSummary 4 分类修复人称矛盾
  * v0.5: char多评论+@提及；user@触发必定评论；"··"气泡定位修复+外部点击关闭；切换空间/主体抑制跳顶
@@ -17,7 +18,7 @@
   var KEYS = {
     SPACES: 'moments:spaces', POSTS: 'moments:posts', NOTIFS: 'moments:notifs',
     SUBAPI: 'moments:subapi', SYNCSTATE: 'moments:syncstate',
-    ACTIVE: 'moments:activeSpace', IMGCACHE: 'moments:imgcache', DARK: 'moments:dark'
+    ACTIVE: 'moments:activeSpace', IMGCACHE: 'moments:imgcache', DARK: 'moments:dark', UIPREFS: 'moments:uiprefs'
   };
   var MIN_POST_INTERVAL = 30 * 60 * 1000;
   var JITTER = 0.2;
@@ -98,7 +99,8 @@
     activeSpaceId: null, currentSubject: 'user',
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
-    charListOpen: false, commentTarget: null, darkMode: false,
+    charListOpen: false, commentTarget: null, darkMode: false, uiPrefsOpen: false,
+    uiPrefs: { topbarH: 44, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     tip: null,            // 局部 loading 提示 {text}
     bootLoading: true,    // 首次加载全屏
@@ -114,16 +116,21 @@
       return Promise.all([
         Store._get(KEYS.SPACES, []), Store._get(KEYS.POSTS, []), Store._get(KEYS.NOTIFS, []),
         Store._get(KEYS.SUBAPI, []), Store._get(KEYS.SYNCSTATE, {}), Store._get(KEYS.ACTIVE, null),
-        Store._get(KEYS.DARK, false)
+        Store._get(KEYS.DARK, false), Store._get(KEYS.UIPREFS, null)
       ]).then(function (r) {
         state.spaces = r[0] || []; state.posts = r[1] || []; state.notifs = r[2] || [];
         state.subapi = r[3] || []; state.syncstate = r[4] || []; state.activeSpaceId = r[5];
         state.darkMode = !!r[6];
+        if (r[7] && typeof r[7] === 'object') {
+          if (r[7].topbarH != null) state.uiPrefs.topbarH = r[7].topbarH;
+          if (r[7].bottomPad != null) state.uiPrefs.bottomPad = r[7].bottomPad;
+        }
         if (!state.activeSpaceId && state.spaces.length) state.activeSpaceId = state.spaces[0].id;
         normalizeSpaces();
       });
     },
     saveDark: function () { return Store._set(KEYS.DARK, state.darkMode); },
+    saveUiPrefs: function () { return Store._set(KEYS.UIPREFS, state.uiPrefs); },
     saveSpaces: function () { return Store._set(KEYS.SPACES, state.spaces); },
     savePosts: function () { return Store._set(KEYS.POSTS, state.posts); },
     saveNotifs: function () { return Store._set(KEYS.NOTIFS, state.notifs); },
@@ -980,7 +987,8 @@
     // 保存所有滚动容器位置，避免重渲染跳顶
     var savedScrolls = state._suppressScrollRestore ? {} : captureScrolls();
     var space = Store.getActiveSpace();
-    var html = '<div class="' + ROOT_CLASS + (state.darkMode ? ' dark' : '') + '">';
+    var rootCls = ROOT_CLASS + (state.darkMode ? ' dark' : '') + (state.commentTarget ? ' commenting' : '');
+    var html = '<div class="' + rootCls + '" style="--topbar-h:' + (state.uiPrefs.topbarH || 44) + 'px;--bottom-pad:' + (state.uiPrefs.bottomPad || 80) + 'px;">';
     // 滚动区：顶栏 sticky + 封面 + feed
     html += '<div class="moments-scroll">';
     html += renderTopbar(space);
@@ -997,6 +1005,7 @@
     if (state.charListOpen) html += renderCharListModal(space);
     if (state.moodPromptsOpen) html += renderMoodPromptsModal(space);
     if (state.npcModalCharId) html += renderNpcModal(space, state.npcModalCharId);
+    if (state.uiPrefsOpen) html += renderUiPrefsModal();
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
@@ -1004,6 +1013,11 @@
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
     if (state.postModalOpen) setupPostModalTools();
+    // 评论输入框出现时，把目标帖子滚到可见区域（避免被输入栏遮挡）
+    if (state.commentTarget) {
+      var tgt = $('.moment[data-id="' + state.commentTarget.postId + '"] .moment-acts', root);
+      if (tgt) tgt.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   // 顶栏：黑底白字微信风格
@@ -1147,6 +1161,7 @@
     }
     html += '<div class="moments-sb-sec"><div class="moments-sb-label">设置</div>';
     html += '<div class="moments-sb-item" data-action="toggle-dark"><div class="moments-sb-info"><div class="moments-sb-name">夜间模式</div><div class="moments-sb-sub">' + (state.darkMode ? '已开启' : '已关闭') + '</div></div></div>';
+    html += '<div class="moments-sb-item" data-action="open-uiprefs"><div class="moments-sb-info"><div class="moments-sb-name">界面尺寸调整</div><div class="moments-sb-sub">顶栏高度 · 底部安全边距</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-mood-prompts"><div class="moments-sb-info"><div class="moments-sb-name">氛围提示词</div><div class="moments-sb-sub">自定义发圈/评论氛围</div></div></div>';
     html += '<div class="moments-sb-item" data-action="open-subapi"><div class="moments-sb-info"><div class="moments-sb-name">副 API 设置</div><div class="moments-sb-sub">' + (getActiveSubApi() ? getActiveSubApi().name : '默认 roche.ai.chat') + '</div></div></div>';
     html += '<div class="moments-sb-item" data-action="clear-img-cache"><div class="moments-sb-info"><div class="moments-sb-name">清除本地图片缓存</div></div></div>';
@@ -1258,6 +1273,22 @@
       '<div class="moments-btn-row"><button class="moments-btn" data-action="publish-post">发表</button></div></div></div></div>';
   }
 
+  function renderUiPrefsModal() {
+    var tb = state.uiPrefs.topbarH || 44;
+    var bp = state.uiPrefs.bottomPad || 80;
+    var html = '<div class="moments-modal-mask" data-action="close-uiprefs"><div class="moments-modal" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">界面尺寸调整</div><div class="moments-modal-x" data-action="close-uiprefs">' + ICON.close + '</div></div><div class="moments-modal-bd">';
+    html += '<div class="moments-hint">拖动滑块实时预览，设置自动保存，所有屏幕尺寸通用。</div>';
+    html += '<div class="moments-div"></div>';
+    html += '<div class="moments-row"><div class="moments-row-label">顶栏高度 <span class="moments-range-val" id="uipref-tb-val">' + tb + 'px</span></div>';
+    html += '<input class="moments-range" type="range" min="36" max="72" step="1" value="' + tb + '" data-field="uipref-topbar"></div>';
+    html += '<div class="moments-div"></div>';
+    html += '<div class="moments-row"><div class="moments-row-label">底部安全边距 <span class="moments-range-val" id="uipref-bp-val">' + bp + 'px</span></div>';
+    html += '<div class="moments-hint">为评论输入栏预留空间，防止遮挡底部朋友圈内容；不同屏幕均生效。</div>';
+    html += '<input class="moments-range" type="range" min="0" max="240" step="2" value="' + bp + '" data-field="uipref-bottompad"></div>';
+    html += '<div class="moments-div"></div>';
+    html += '<div class="moments-btn-row"><button class="moments-btn ghost" data-action="reset-uiprefs">恢复默认</button><button class="moments-btn" data-action="close-uiprefs">完成</button></div>';
+    return html + '</div></div></div>';
+  }
   function renderCommentInput() {
     var t = state.commentTarget; if (!t) return '';
     var post = null; for (var i = 0; i < state.posts.length; i++) if (state.posts[i].id === t.postId) { post = state.posts[i]; break; }
@@ -1294,6 +1325,7 @@
     root.addEventListener('click', onRootClick);
     root.addEventListener('dblclick', onRootDblClick);
     root.addEventListener('change', onRootChange);
+    root.addEventListener('input', onRootChange);
   }
   function closestEl(el, attr, val) {
     while (el && el !== root) {
@@ -1341,6 +1373,22 @@
   }
   function onRootChange(e) {
     var t = e.target; var field = t.getAttribute && t.getAttribute('data-field'); if (!field) return;
+    // 界面尺寸滑块实时预览（input 事件持续触发；change 事件释放时再持久化）
+    if (field === 'uipref-topbar' || field === 'uipref-bottompad') {
+      var val = parseInt(t.value, 10); if (isNaN(val)) return;
+      var rootEl = root.querySelector('.' + ROOT_CLASS);
+      if (field === 'uipref-topbar') {
+        state.uiPrefs.topbarH = val;
+        if (rootEl) rootEl.style.setProperty('--topbar-h', val + 'px');
+        var tbValEl = $('#uipref-tb-val', root); if (tbValEl) tbValEl.textContent = val + 'px';
+      } else {
+        state.uiPrefs.bottomPad = val;
+        if (rootEl) rootEl.style.setProperty('--bottom-pad', val + 'px');
+        var bpValEl = $('#uipref-bp-val', root); if (bpValEl) bpValEl.textContent = val + 'px';
+      }
+      if (e.type === 'change') Store.saveUiPrefs();
+      return;
+    }
     // 氛围提示词（space 级，无 cid，textarea 失焦时保存）
     if (field === 'mood-charPost' || field === 'mood-charComment' || field === 'mood-npcComment') {
       var sp0 = Store.getActiveSpace(); if (sp0) { sp0.customPrompts[field.replace('mood-', '')] = t.value; Store.saveSpaces(); }
@@ -1364,6 +1412,9 @@
       case 'open-sidebar': state.sidebarOpen = true; render(); break;
       case 'close-sidebar': state.sidebarOpen = false; render(); break;
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
+      case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
+      case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
+      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 44, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
       case 'open-notif': state.notifPanelOpen = true; Store.markAllNotifRead(); render(); break;
       case 'close-notif': state.notifPanelOpen = false; render(); break;
       case 'clear-notifs': Store.clearNotifs().then(render); break;
@@ -1604,13 +1655,20 @@
   var CSS = ''
 + '.' + ROOT_CLASS + '{position:absolute;inset:0;background:#EDEDED;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#353535;font-size:14px;line-height:1.5;}'
 + '.' + ROOT_CLASS + ' *{box-sizing:border-box;}'
-// 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动
-+ '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}'
-// 顶栏 黑底白字 sticky
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;height:44px;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;flex-shrink:0;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-left{width:40px;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-title{flex:1;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-right{display:flex;align-items:center;gap:2px;}'
+// 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
++ '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
+// 顶栏 黑底白字 sticky；高度可调
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;height:var(--topbar-h,44px);display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;flex-shrink:0;}'
++ '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
++ '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
++ '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
+// 评论态：滚动区底部额外让出输入栏高度，确保不遮挡
++ '.' + ROOT_CLASS + '.commenting .moments-scroll{padding-bottom:calc(var(--cm-h,52px) + var(--bottom-pad,80px) + 12px);}'
+
++ '.' + ROOT_CLASS + ' .moments-range{width:100%;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:#ddd;outline:none;margin:6px 0;}'
++ '.' + ROOT_CLASS + ' .moments-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:#576B95;cursor:pointer;}'
++ '.' + ROOT_CLASS + ' .moments-range::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#576B95;cursor:pointer;border:none;}'
++ '.' + ROOT_CLASS + ' .moments-range-val{font-size:12px;color:#576B95;font-weight:600;min-width:42px;text-align:right;}'
 + '.' + ROOT_CLASS + ' .moments-tb-icon{width:40px;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative;}'
 + '.' + ROOT_CLASS + ' .moments-dot{position:absolute;top:7px;right:8px;width:8px;height:8px;background:#FA5151;border-radius:50%;border:1.5px solid #1F1F1F;}'
 // 封面
@@ -1823,7 +1881,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.7.0',
+    version: '0.7.1',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
