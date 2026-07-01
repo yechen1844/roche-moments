@@ -1,8 +1,8 @@
 {
   "id": "roche-moments",
   "name": "朋友圈",
-  "version": "0.9.0",
-  "description": "v0.9.0：彻底修复侧边栏第二次打开后点击失效的问题。将 render() 延迟到 touchend 后执行，避免在 touch 序列中替换 DOM 导致安卓 WebView 不再合成 click 事件。v0.8.8：不再吞任何 click，遮罩延迟可点击。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
+  "version": "0.9.1",
+  "description": "v0.9.1：添加右下角调试日志面板，用于诊断侧边栏点击失效问题。v0.9.0：将 render() 延迟到 touchend 后执行。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
   "author": "RocheMoments",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-moments/main/moments.js",
   "hash": "",
