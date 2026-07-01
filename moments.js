@@ -106,7 +106,7 @@
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
     charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, lpSheetOpen: false, lpTarget: null, darkMode: false, uiPrefsOpen: false,
-    uiPrefs: { topbarH: 44, bottomPad: 80 },
+    uiPrefs: { topbarH: 72, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
     syncFormatOpen: false,
@@ -1680,7 +1680,7 @@
     html += '<div class="moments-hint">拖动滑块实时预览，设置自动保存，所有屏幕尺寸通用。</div>';
     html += '<div class="moments-div"></div>';
     html += '<div class="moments-row"><div class="moments-row-label">顶栏高度 <span class="moments-range-val" id="uipref-tb-val">' + tb + 'px</span></div>';
-    html += '<input class="moments-range" type="range" min="36" max="72" step="1" value="' + tb + '" data-field="uipref-topbar"></div>';
+    html += '<input class="moments-range" type="range" min="44" max="120" step="1" value="' + tb + '" data-field="uipref-topbar"></div>';
     html += '<div class="moments-div"></div>';
     html += '<div class="moments-row"><div class="moments-row-label">底部安全边距 <span class="moments-range-val" id="uipref-bp-val">' + bp + 'px</span></div>';
     html += '<div class="moments-hint">为评论输入栏预留空间，防止遮挡底部朋友圈内容；不同屏幕均生效。</div>';
@@ -1964,7 +1964,7 @@
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
       case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
       case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
-      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 44, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
+      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 72, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
       case 'open-notif': state.notifPanelOpen = true; Store.markAllNotifRead(); render(); break;
       case 'close-notif': state.notifPanelOpen = false; render(); break;
       case 'clear-notifs': Store.clearNotifs().then(render); break;
@@ -2290,7 +2290,7 @@
 // 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
 + '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
 // 顶栏 黑底白字 sticky；高度可调
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px) + 36px);height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px) + 36px);flex-shrink:0;box-sizing:border-box;}'
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px));height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px));flex-shrink:0;box-sizing:border-box;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
 + '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;padding:8px 12px;margin:-8px -12px;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
@@ -2529,7 +2529,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '1.0.1',
+    version: '1.0.2',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
