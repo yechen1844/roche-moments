@@ -119,8 +119,10 @@
   var _lpStartX = 0;
   var _lpStartY = 0;
   var _lpTouchActive = false;
-  // 上一次 render() 完成的时间戳，用于阻止长按后立即产生的合成 click 误关刚打开的侧边栏/操作菜单
-  var _lastRenderTs = 0;
+  // 长按达到阈值后暂存的操作，延迟到 touchend 后执行 render
+  // 关键：在 touch 序列进行中替换 root.innerHTML 会移除 touch target，
+  // 导致安卓 WebView 不再合成 click 事件，后续所有点击失效（但滑动不受影响）
+  var _pendingLpAction = null;
 
   // ========== Store ==========
   var Store = {
@@ -1242,9 +1244,6 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
-    // 记录本次 render 完成的时间戳，用于在 close-* 动作中作为守卫判断
-    // 防止长按触发 render 后立即产生的合成 click 误关刚打开的侧边栏/操作菜单
-    _lastRenderTs = Date.now();
     // 恢复滚动位置
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
@@ -1787,22 +1786,28 @@
         lpInfo.anchor.classList.add('lp-active');
         setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
       }
+      // 关键修复：不在此处直接 render()，而是暂存操作延迟到 touchend 后执行
+      // 原因：在 touch 序列进行中替换 root.innerHTML 会移除 touch target，
+      // 安卓 WebView 因此不再合成 click 事件，导致侧边栏打开后所有点击失效
       if (lpInfo.type === 'cover-avatar') {
-        state.sidebarOpen = true;
+        _pendingLpAction = function () { state.sidebarOpen = true; render(); };
       } else {
-        state.lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
-        state.lpSheetOpen = true;
+        var lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
+        _pendingLpAction = function () { state.lpTarget = lpTarget; state.lpSheetOpen = true; render(); };
       }
-      render();
     }, LP_DELAY);
   }
 
   function onLpEnd(e) {
     // touchend 与 touchcancel 都需要清除触摸态
-    // 关键修复：iOS 上侧边栏的 overflow-y:auto + -webkit-overflow-scrolling:touch
-    // 在滚动开始时会把 touchend 转为 touchcancel，若不在此清除，_lpTouchActive 会卡死为 true
     if (e && (e.type === 'touchend' || e.type === 'touchcancel')) _lpTouchActive = false;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    // 关键修复：执行延迟的 render，此时 touch 序列已结束，DOM 替换不会影响 click 合成
+    if (_pendingLpAction) {
+      var action = _pendingLpAction;
+      _pendingLpAction = null;
+      action();
+    }
   }
 
   function onLpMove(e) {
@@ -1817,6 +1822,12 @@
 
   function onLpCancel() {
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    // touchcancel 时也清除暂存的操作，避免 render 被丢弃
+    if (_pendingLpAction) {
+      var action = _pendingLpAction;
+      _pendingLpAction = null;
+      action();
+    }
   }
 
   // ========== 事件 ==========
@@ -1938,12 +1949,7 @@
     switch (act) {
       case 'back': if (cachedRoche && cachedRoche.ui) cachedRoche.ui.closeApp(); break;
       case 'open-sidebar': state.sidebarOpen = true; render(); break;
-      case 'close-sidebar': {
-        // 守卫：长按触发的 render 完成后 200ms 内产生的合成 click 不能关闭侧边栏
-        // 这样可避免手指抬起后浏览器合成的 click 误关刚打开的侧边栏
-        if (Date.now() - _lastRenderTs < 200) return;
-        state.sidebarOpen = false; render(); break;
-      }
+      case 'close-sidebar': state.sidebarOpen = false; render(); break;
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
       case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
       case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
@@ -1957,11 +1963,7 @@
       case 'open-post-modal': pendingImages = []; state.postModalOpen = true; render(); break;
       case 'close-post-modal': state.postModalOpen = false; pendingImages = []; render(); break;
       case 'close-edit-modal': state.editModalOpen = false; state.editPostId = null; pendingImages = []; render(); break;
-      case 'close-lp-sheet': {
-        // 守卫：长按触发的 render 完成后 200ms 内产生的合成 click 不能关闭操作菜单
-        if (Date.now() - _lastRenderTs < 200) return;
-        state.lpSheetOpen = false; state.lpTarget = null; render(); break;
-      }
+      case 'close-lp-sheet': state.lpSheetOpen = false; state.lpTarget = null; render(); break;
       case 'open-subapi': state.subApiPanelOpen = true; render(); break;
       case 'close-subapi': state.subApiPanelOpen = false; render(); break;
       case 'open-char-list': state.charListOpen = true; render(); break;
@@ -2516,7 +2518,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.9',
+    version: '0.9.0',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
