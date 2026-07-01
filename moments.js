@@ -1,7 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.7
+ * Roche 朋友圈插件 v0.8.8
  * 完全拟真微信朋友圈的沉浸式模拟
- * v0.8.7: 彻底重写长按点击拦截——用 document 捕获阶段一次性吞掉合成 click，用完即焚，无任何全局标志/定时器/class
+ * v0.8.8: 不再吞任何 click。长按后遮罩延迟 150ms 可点击，合成事件自然穿透。
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -119,7 +119,6 @@
   var _lpStartX = 0;
   var _lpStartY = 0;
   var _lpTouchActive = false;
-  var _lpSwallowId = 0;
 
   // ========== Store ==========
   var Store = {
@@ -1241,6 +1240,14 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
+    // 让遮罩在 150ms 内不可点击，防止长按后的合成 click 误关刚打开的侧边栏/操作菜单
+    (function () {
+      var masks = root.querySelectorAll('.moments-mask, .moments-modal-mask');
+      for (var mi = 0; mi < masks.length; mi++) masks[mi].style.pointerEvents = 'none';
+      setTimeout(function () {
+        for (var mj = 0; mj < masks.length; mj++) masks[mj].style.pointerEvents = '';
+      }, 150);
+    })();
     // 恢复滚动位置
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
@@ -1767,18 +1774,6 @@
     return null;
   }
 
-  // 吞掉长按后的那一个合成 click（捕获阶段 + 用完即焚）
-  function swallowNextClick() {
-    var id = ++_lpSwallowId;
-    function handler(e) {
-      document.removeEventListener('click', handler, true);
-      if (id === _lpSwallowId) { e.stopPropagation(); e.preventDefault(); }
-    }
-    document.addEventListener('click', handler, true);
-    // 安全兜底：1s 后自动移除
-    setTimeout(function () { document.removeEventListener('click', handler, true); }, 1000);
-  }
-
   function onLpStart(e) {
     if (e.type === 'touchstart') _lpTouchActive = true;
     if (e.type === 'mousedown' && _lpTouchActive) return;
@@ -1791,7 +1786,6 @@
     if (!lpInfo) return;
     _lpTimer = setTimeout(function () {
       _lpTimer = null;
-      swallowNextClick();
       if (lpInfo.anchor) {
         lpInfo.anchor.classList.add('lp-active');
         setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
@@ -2512,7 +2506,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.7',
+    version: '0.8.8',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
