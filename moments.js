@@ -124,215 +124,6 @@
   // 导致安卓 WebView 不再合成 click 事件，后续所有点击失效（但滑动不受影响）
   var _pendingLpAction = null;
 
-  // ========== 调试日志面板（独立于 root.innerHTML，避免被重渲染销毁）==========
-  var _dbgEntries = [];
-  var _dbgPanel = null;
-  var _dbgBox = null;
-  var _dbgAutoScroll = true;
-  var _dbgDragging = false;
-  var _dbgDragStartY = 0;
-  var _dbgDragStartH = 0;
-  var _DBG_MAX = 300;
-  var _dbgCountEl = null;
-  var _dbgLastHealth = null;
-  var _dbgHeartbeatCount = 0;
-  var _dbgLastTopEls = null;
-  function dbgLog(tag, msg) {
-    var ts = new Date();
-    var time = ('0' + ts.getHours()).slice(-2) + ':' + ('0' + ts.getMinutes()).slice(-2) + ':' + ('0' + ts.getSeconds()).slice(-2) + '.' + ('00' + ts.getMilliseconds()).slice(-3);
-    var line = '[' + time + '] ' + tag + ': ' + msg;
-    _dbgEntries.push(line);
-    if (_dbgEntries.length > _DBG_MAX) _dbgEntries.shift();
-    if (!_dbgPanel) dbgMount();
-    if (_dbgBox) {
-      _dbgBox.textContent = _dbgEntries.join('\n');
-      if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
-    }
-    if (_dbgCountEl) _dbgCountEl.textContent = '(' + _dbgEntries.length + '/' + _DBG_MAX + ')';
-  }
-  function dbgState() {
-    return 'lpA=' + (_lpTouchActive ? 1 : 0)
-      + ' tmr=' + (_lpTimer ? 1 : 0)
-      + ' pend=' + (_pendingLpAction ? 1 : 0)
-      + ' sb=' + (state.sidebarOpen ? 1 : 0)
-      + ' lp=' + (state.lpSheetOpen ? 1 : 0);
-  }
-  function dbgElInfo(el) {
-    if (!el) return 'null';
-    var tag = el.tagName || '?';
-    var cls = el.className ? '.' + String(el.className).replace(/\s+/g, '.').slice(0, 40) : '';
-    var id = el.id ? '#' + el.id : '';
-    var act = el.getAttribute && el.getAttribute('data-action') ? '[data-action=' + el.getAttribute('data-action') + ']' : '';
-    return tag + id + cls + act;
-  }
-  function dbgMount() {
-    if (_dbgPanel || !document.body) return;
-    var css = document.createElement('style');
-    css.textContent = '.moments-dbg-panel{position:fixed;right:6px;bottom:6px;width:340px;height:280px;background:rgba(0,0,0,0.88);color:#0f0;font-family:Menlo,Consolas,"Courier New",monospace;font-size:11px;line-height:1.45;z-index:999999;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;border:1px solid #0a0;box-shadow:0 4px 20px rgba(0,0,0,0.5);}'
-      + '.moments-dbg-panel.collapsed{width:auto;height:auto;border-radius:14px;border:1px solid #333;background:rgba(0,0,0,0.6);}'
-      + '.moments-dbg-panel.collapsed .moments-dbg-bar,.moments-dbg-panel.collapsed .moments-dbg-box{display:none;}'
-      + '.moments-dbg-fab{display:none;cursor:pointer;width:28px;height:28px;border-radius:14px;background:rgba(0,0,0,0.6);color:#0a0;font-size:14px;font-weight:bold;text-align:center;line-height:28px;border:1px solid #333;z-index:999999;}'
-      + '.moments-dbg-panel.collapsed .moments-dbg-fab{display:block;}'
-      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#111;color:#0f0;font-size:11px;font-weight:bold;cursor:default;user-select:none;-webkit-user-select:none;border-bottom:1px solid #0a0;}'
-      + '.moments-dbg-bar-title{display:flex;align-items:center;gap:6px;}'
-      + '.moments-dbg-box{flex:1;overflow-y:auto;padding:4px 8px;white-space:pre-wrap;word-break:break-all;}'
-      + '.moments-dbg-btn{cursor:pointer;color:#0ff;padding:0 6px;font-size:11px;border:1px solid #0aa;border-radius:3px;margin:0 2px;}'
-      + '.moments-dbg-btn:hover{background:rgba(0,255,255,0.15);}'
-      + '.moments-dbg-btn.active{background:rgba(0,255,255,0.3);}'
-      + '.moments-dbg-count{color:#888;font-size:10px;margin-left:4px;font-weight:normal;}'
-      + '.moments-dbg-textarea{width:100%;height:100%;background:transparent;color:#0f0;border:none;outline:none;resize:none;font-family:inherit;font-size:inherit;line-height:inherit;}';
-    document.head.appendChild(css);
-    _dbgPanel = document.createElement('div');
-    _dbgPanel.className = 'moments-dbg-panel collapsed';
-    _dbgPanel.innerHTML = ''
-      + '<div class="moments-dbg-fab" id="_dbgFab">D</div>'
-      + '<div class="moments-dbg-bar">'
-      + '  <div class="moments-dbg-bar-title"><span>Moments Debug</span><span class="moments-dbg-count" id="_dbgCount"></span></div>'
-      + '  <div>'
-      + '    <span class="moments-dbg-btn" id="_dbgCopy">COPY</span>'
-      + '    <span class="moments-dbg-btn active" id="_dbgAuto">AUTO</span>'
-      + '    <span class="moments-dbg-btn" id="_dbgClear">CLR</span>'
-      + '    <span class="moments-dbg-btn" id="_dbgCollapse">-</span>'
-      + '  </div>'
-      + '</div>'
-      + '<div class="moments-dbg-box"></div>';
-    document.body.appendChild(_dbgPanel);
-    _dbgBox = _dbgPanel.querySelector('.moments-dbg-box');
-    _dbgCountEl = _dbgPanel.querySelector('#_dbgCount');
-    var autoBtn = _dbgPanel.querySelector('#_dbgAuto');
-    // FAB 点击展开
-    _dbgPanel.querySelector('#_dbgFab').addEventListener('click', function (e) {
-      e.stopPropagation();
-      _dbgPanel.classList.remove('collapsed');
-      if (_dbgBox) {
-        _dbgBox.textContent = _dbgEntries.join('\n');
-        if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
-      }
-    });
-    // 折叠按钮
-    _dbgPanel.querySelector('#_dbgCollapse').addEventListener('click', function (e) { e.stopPropagation(); _dbgPanel.classList.add('collapsed'); });
-    _dbgPanel.querySelector('#_dbgClear').addEventListener('click', function (e) { e.stopPropagation(); _dbgEntries.length = 0; if (_dbgBox) _dbgBox.textContent = ''; if (_dbgCountEl) _dbgCountEl.textContent = '(0/' + _DBG_MAX + ')'; });
-    autoBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      _dbgAutoScroll = !_dbgAutoScroll;
-      autoBtn.classList.toggle('active', _dbgAutoScroll);
-      if (_dbgAutoScroll && _dbgBox) _dbgBox.scrollTop = _dbgBox.scrollHeight;
-    });
-    _dbgPanel.querySelector('#_dbgCopy').addEventListener('click', function (e) {
-      e.stopPropagation();
-      var text = _dbgEntries.join('\n');
-      var ta = document.createElement('textarea');
-      ta.className = 'moments-dbg-textarea';
-      ta.value = text;
-      _dbgBox.innerHTML = '';
-      _dbgBox.appendChild(ta);
-      ta.focus();
-      ta.select();
-      try { document.execCommand('copy'); } catch (err) {}
-      setTimeout(function () {
-        _dbgBox.textContent = _dbgEntries.join('\n');
-        if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
-      }, 800);
-    });
-    _dbgBox.addEventListener('scroll', function () {
-      if (!_dbgBox) return;
-      var nearBottom = _dbgBox.scrollHeight - _dbgBox.scrollTop - _dbgBox.clientHeight < 20;
-      if (nearBottom !== _dbgAutoScroll) {
-        _dbgAutoScroll = nearBottom;
-        autoBtn.classList.toggle('active', _dbgAutoScroll);
-      }
-    });
-    _dbgBox.textContent = _dbgEntries.join('\n');
-    if (_dbgCountEl) _dbgCountEl.textContent = '(' + _dbgEntries.length + '/' + _DBG_MAX + ')';
-    // 只在 root 存在时显示（朋友圈限定）
-    _dbgPanel.style.display = root ? 'flex' : 'none';
-
-    // 在 document 捕获阶段监听全局事件，不依赖 root
-    // 这样即使 root 上的监听器失效，也能看到事件是否真的触发
-    var globalEvts = ['touchstart', 'touchend', 'touchcancel', 'click', 'mousedown', 'mouseup'];
-    var _docLastEvt = {};
-    for (var gi = 0; gi < globalEvts.length; gi++) {
-      (function (evtName) {
-        document.addEventListener(evtName, function (e) {
-          var tgt = e.target;
-          var tinfo = dbgElInfo(tgt);
-          var inRoot = root && root.contains && root.contains(tgt);
-          var pe = '';
-          try { pe = getComputedStyle(tgt).pointerEvents; } catch (err) {}
-          var key = evtName + '|' + tinfo + '|' + (inRoot ? 1 : 0);
-          if (_docLastEvt[evtName] !== key) {
-            _docLastEvt[evtName] = key;
-            dbgLog('DOC', evtName + ' tgt=' + tinfo + ' inRoot=' + (inRoot ? 1 : 0) + ' pe=' + pe);
-          }
-        }, true);
-      })(globalEvts[gi]);
-    }
-    // touchmove 单独处理，每 200ms 最多一条，避免刷屏
-    var _docMoveTimer = null;
-    var _docMoveInfo = null;
-    document.addEventListener('touchmove', function (e) {
-      var tgt = e.target;
-      var tinfo = dbgElInfo(tgt);
-      var inRoot = root && root.contains && root.contains(tgt);
-      _docMoveInfo = { tinfo: tinfo, inRoot: inRoot };
-      if (!_docMoveTimer) {
-        _docMoveTimer = setTimeout(function () {
-          _docMoveTimer = null;
-          if (_docMoveInfo) dbgLog('DOC', 'touchmove tgt=' + _docMoveInfo.tinfo + ' inRoot=' + (_docMoveInfo.inRoot ? 1 : 0) + ' (throttled)');
-        }, 200);
-      }
-    }, true);
-
-    // JS 心跳检测（只要 JS 活着就每秒跳一次）
-    setInterval(function () {
-      _dbgHeartbeatCount++;
-      dbgLog('HEART', 'tick=' + _dbgHeartbeatCount + ' ' + dbgState());
-    }, 1000);
-
-    // 定时检测 root 健康状态 + 全屏覆盖元素检测
-    setInterval(function () {
-      if (!root) return;
-      var inDoc = document.body && document.body.contains(root);
-      var rpe = '';
-      try { rpe = getComputedStyle(root).pointerEvents; } catch (err) {}
-      var childCnt = root.children ? root.children.length : 0;
-      var listenerInfo = 'rootInDoc=' + (inDoc ? 1 : 0) + ' pe=' + rpe + ' children=' + childCnt + ' ' + dbgState();
-      var lastInfo = _dbgLastHealth;
-      if (lastInfo !== listenerInfo) {
-        dbgLog('HEALTH', listenerInfo);
-        _dbgLastHealth = listenerInfo;
-      }
-      // 检测是否有全屏覆盖元素（中心和四角取点）
-      var W = window.innerWidth, H = window.innerHeight;
-      var pts = [[W/2, H/2], [10, 10], [W-10, 10], [10, H-10], [W-10, H-10]];
-      var topEls = [];
-      for (var pi = 0; pi < pts.length; pi++) {
-        try {
-          var el = document.elementFromPoint(pts[pi][0], pts[pi][1]);
-          if (el) topEls.push(dbgElInfo(el));
-        } catch (e) {}
-      }
-      var topInfo = topEls.join(' | ');
-      if (_dbgLastTopEls !== topInfo) {
-        dbgLog('TOP_ELS', topInfo);
-        _dbgLastTopEls = topInfo;
-      }
-    }, 2000);
-  }
-
-  // 全局错误捕获
-  var _dbgOrigOnError = window.onerror;
-  window.onerror = function (msg, url, line, col, err) {
-    dbgLog('ERROR', msg + ' @' + line + ':' + col + (err && err.stack ? '\n' + err.stack : ''));
-    if (_dbgOrigOnError) return _dbgOrigOnError.apply(this, arguments);
-    return false;
-  };
-  var _dbgOrigOnRej = window.onunhandledrejection;
-  window.onunhandledrejection = function (e) {
-    dbgLog('UNHANDLED_REJ', String(e.reason));
-    if (_dbgOrigOnRej) return _dbgOrigOnRej.apply(this, arguments);
-  };
-
   // ========== Store ==========
   var Store = {
     _get: function (k, d) { return cachedRoche.storage.get(k).then(function (v) { return v == null ? d : v; }); },
@@ -1420,7 +1211,6 @@
   }
   function render() {
     if (!root) return;
-    dbgLog('RENDER', 'sb=' + (state.sidebarOpen ? 1 : 0) + ' lp=' + (state.lpSheetOpen ? 1 : 0) + ' pend=' + (_pendingLpAction ? 1 : 0));
     if (state.bootLoading) {
       root.innerHTML = '<div class="' + ROOT_CLASS + '"><div class="moments-boot"><div class="moments-spin">' + WINDMILL_SVG + '</div><div class="moments-boot-text">加载中...</div></div></div>';
       return;
@@ -1979,10 +1769,9 @@
   }
 
   function onLpStart(e) {
-    dbgLog('LPSTART', e.type + ' ' + dbgState());
     if (e.type === 'touchstart') _lpTouchActive = true;
-    if (e.type === 'mousedown' && _lpTouchActive) { dbgLog('LPSTART', 'mousedown skipped (lpTouchActive)'); return; }
-    if (state.lpSheetOpen || state.sidebarOpen) { dbgLog('LPSTART', 'skip (already open)'); return; }
+    if (e.type === 'mousedown' && _lpTouchActive) return;
+    if (state.lpSheetOpen || state.sidebarOpen) return;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     var touch = e.touches ? e.touches[0] : e;
     _lpStartX = touch.clientX;
@@ -1991,33 +1780,21 @@
     if (!lpInfo) return;
     _lpTimer = setTimeout(function () {
       _lpTimer = null;
-      dbgLog('LPTIMER', 'fired type=' + lpInfo.type + ' ' + dbgState());
       if (lpInfo.anchor) {
         lpInfo.anchor.classList.add('lp-active');
         setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
       }
-      // 关键修复：不在此处直接 render()，而是暂存操作延迟到 touchend 后执行
-      // 原因：在 touch 序列进行中替换 root.innerHTML 会移除 touch target，
-      // 安卓 WebView 因此不再合成 click 事件，导致侧边栏打开后所有点击失效
-      if (lpInfo.type === 'cover-avatar') {
-        _pendingLpAction = function () { state.sidebarOpen = true; render(); };
-      } else {
-        var lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
-        _pendingLpAction = function () { state.lpTarget = lpTarget; state.lpSheetOpen = true; render(); };
-      }
+      var lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
+      _pendingLpAction = function () { state.lpTarget = lpTarget; state.lpSheetOpen = true; render(); };
     }, LP_DELAY);
   }
 
   function onLpEnd(e) {
-    dbgLog('LPEND', e.type + ' ' + dbgState());
-    // touchend 与 touchcancel 都需要清除触摸态
     if (e && (e.type === 'touchend' || e.type === 'touchcancel')) _lpTouchActive = false;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
-    // 关键修复：执行延迟的 render，此时 touch 序列已结束，DOM 替换不会影响 click 合成
     if (_pendingLpAction) {
       var action = _pendingLpAction;
       _pendingLpAction = null;
-      dbgLog('LPEND', 'exec pending action');
       action();
     }
   }
@@ -2033,13 +1810,10 @@
   }
 
   function onLpCancel(e) {
-    dbgLog('LPCANCEL', (e ? e.type : '?') + ' ' + dbgState());
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
-    // touchcancel 时也清除暂存的操作，避免 render 被丢弃
     if (_pendingLpAction) {
       var action = _pendingLpAction;
       _pendingLpAction = null;
-      dbgLog('LPCANCEL', 'exec pending action');
       action();
     }
   }
@@ -2101,7 +1875,6 @@
   }
   function onRootClick(e) {
     var t = e.target;
-    dbgLog('CLICK', 'target=' + (t.tagName + (t.className ? '.' + String(t.className).slice(0, 30) : '')) + ' ' + dbgState());
     // 文字图点击：直接 toggle class，不 render
     var textToggle = closestEl(t, 'data-action', 'toggle-text');
     if (textToggle) { textToggle.classList.toggle('revealed'); return; }
@@ -2184,7 +1957,6 @@
 
   function handleAction(act, t, e) {
     var space = Store.getActiveSpace();
-    dbgLog('ACTION', act + ' ' + dbgState());
     switch (act) {
       case 'back': if (cachedRoche && cachedRoche.ui) cachedRoche.ui.closeApp(); break;
       case 'open-sidebar': state.sidebarOpen = true; render(); break;
@@ -2518,7 +2290,7 @@
 // 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
 + '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
 // 顶栏 黑底白字 sticky；高度可调
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px) + 28px);height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px) + 28px);flex-shrink:0;box-sizing:border-box;}'
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px) + 44px);height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px) + 44px);flex-shrink:0;box-sizing:border-box;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
 + '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;padding:8px 12px;margin:-8px -12px;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
@@ -2757,7 +2529,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.7',
+    version: '0.9.8',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2766,8 +2538,6 @@
         cachedRoche = roche;
         root = container;
         state.bootLoading = true;
-        dbgMount();
-        dbgLog('MOUNT', 'plugin mount start');
         if (!document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]')) {
           var st = document.createElement('style');
           st.setAttribute('data-plugin', PLUGIN_ID);
@@ -2817,7 +2587,6 @@
         }
         pendingImages = [];
         if (container) container.replaceChildren();
-        if (_dbgPanel) _dbgPanel.style.display = 'none';
         root = null;
       }
     }]
