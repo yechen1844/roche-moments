@@ -1,7 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.3
+ * Roche 朋友圈插件 v0.8.4
  * 完全拟真微信朋友圈的沉浸式模拟
- * v0.8.3: 长按朋友圈弹出编辑/删除底部菜单；长按评论弹出删除底部菜单；操作气泡（···）仅保留赞/评论/召唤；移除评论 X 删除按钮，改为沉浸式长按交互
+ * v0.8.4: 顶栏适配改为增加顶部空白区域（而非拉伸变形）；长按封面头像可打开侧边栏（短按保留切换主体）；修复长按/双击导致点击事件全部失效的交互阻塞 bug（触摸设备双触发+_lpFired 竞态）
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -119,6 +119,7 @@
   var _lpFired = false;
   var _lpStartX = 0;
   var _lpStartY = 0;
+  var _lpTouchActive = false;
 
   // ========== Store ==========
   var Store = {
@@ -1215,7 +1216,7 @@
     var savedScrolls = state._suppressScrollRestore ? {} : captureScrolls();
     var space = Store.getActiveSpace();
     var rootCls = ROOT_CLASS + (state.darkMode ? ' dark' : '') + (state.commentTarget ? ' commenting' : '');
-    var html = '<div class="' + rootCls + '" style="--topbar-h:' + (state.uiPrefs.topbarH || 44) + 'px;--bottom-pad:' + (state.uiPrefs.bottomPad || 80) + 'px;">';
+    var html = '<div class="' + rootCls + '" style="--topbar-pad:' + Math.max(0, (state.uiPrefs.topbarH || 44) - 44) + 'px;--bottom-pad:' + (state.uiPrefs.bottomPad || 80) + 'px;">';
     // 滚动区：顶栏 sticky + 封面 + feed
     html += '<div class="moments-scroll">';
     html += renderTopbar(space);
@@ -1738,17 +1739,24 @@
   function findLpAnchor(el) {
     while (el && el !== root) {
       if (el.getAttribute) {
+        // 排除：···按钮、图片、帖子头像、作者名、操作气泡
         if (el.getAttribute('data-action') === 'open-acts') return null;
         if (el.getAttribute('data-action') === 'view-photo') return null;
         if (el.getAttribute('data-action') === 'toggle-text') return null;
         if (el.classList && el.classList.contains('moment-avatar')) return null;
         if (el.getAttribute('data-action') === 'view-author') return null;
         if (el.classList && el.classList.contains('moment-act-pop')) return null;
+        // 封面头像长按 → 开侧边栏
+        if (el.classList && el.classList.contains('moments-cover-avatar')) {
+          return { type: 'cover-avatar', anchor: el };
+        }
+        // 评论锚点（优先，嵌套在帖子内）
         if (el.classList && el.classList.contains('mc')) {
           var cid = el.getAttribute('data-cid');
           var pid = el.getAttribute('data-id');
           if (cid && pid) return { type: 'comment', postId: pid, commentId: cid, anchor: el };
         }
+        // 帖子锚点
         if (el.classList && el.classList.contains('moment')) {
           var mid = el.getAttribute('data-id');
           if (mid) return { type: 'post', postId: mid, anchor: el };
@@ -1760,8 +1768,12 @@
   }
 
   function onLpStart(e) {
+    // 触摸设备：touchstart 先于 mousedown，防止双触发
+    if (e.type === 'touchstart') _lpTouchActive = true;
+    if (e.type === 'mousedown' && _lpTouchActive) return;
+    // 清除旧定时器（防止残留 timer 干扰）
+    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     _lpFired = false;
-    _lpTimer = null;
     var touch = e.touches ? e.touches[0] : e;
     _lpStartX = touch.clientX;
     _lpStartY = touch.clientY;
@@ -1775,14 +1787,21 @@
         lpInfo.anchor.classList.add('lp-active');
         setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
       }
-      state.lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
-      state.lpSheetOpen = true;
-      render();
+      if (lpInfo.type === 'cover-avatar') {
+        // 长按封面头像 → 打开侧边栏
+        state.sidebarOpen = true;
+        render();
+      } else {
+        state.lpTarget = { type: lpInfo.type, postId: lpInfo.postId, commentId: lpInfo.commentId || null };
+        state.lpSheetOpen = true;
+        render();
+      }
       if (e.cancelable) e.preventDefault();
     }, LP_DELAY);
   }
 
-  function onLpEnd() {
+  function onLpEnd(e) {
+    if (e && e.type === 'touchend') _lpTouchActive = false;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     if (_lpFired) { setTimeout(function () { _lpFired = false; }, 400); }
   }
@@ -1799,6 +1818,7 @@
 
   function onLpCancel() {
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    if (_lpFired) { setTimeout(function () { _lpFired = false; }, 400); }
   }
 
   // ========== 事件 ==========
@@ -1868,7 +1888,8 @@
       var rootEl = root.querySelector('.' + ROOT_CLASS);
       if (field === 'uipref-topbar') {
         state.uiPrefs.topbarH = val;
-        if (rootEl) rootEl.style.setProperty('--topbar-h', val + 'px');
+        var padVal = Math.max(0, val - 44);
+        if (rootEl) rootEl.style.setProperty('--topbar-pad', padVal + 'px');
         var tbValEl = $('#uipref-tb-val', root); if (tbValEl) tbValEl.textContent = val + 'px';
       } else {
         state.uiPrefs.bottomPad = val;
@@ -2249,7 +2270,7 @@
 // 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
 + '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
 // 顶栏 黑底白字 sticky；高度可调
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;height:var(--topbar-h,44px);display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;flex-shrink:0;}'
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:var(--topbar-pad,0px);height:calc(44px + var(--topbar-pad,0px));flex-shrink:0;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
 + '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
@@ -2488,7 +2509,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.3',
+    version: '0.8.4',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
