@@ -2516,9 +2516,9 @@
 // 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
 + '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
 // 顶栏 黑底白字 sticky；高度可调
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px));height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px));flex-shrink:0;box-sizing:border-box;}'
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px) + 28px);height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px) + 28px);flex-shrink:0;box-sizing:border-box;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
++ '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;padding:8px 12px;margin:-8px -12px;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
 // 评论态：滚动区底部额外让出输入栏高度，确保不遮挡
 + '.' + ROOT_CLASS + '.commenting .moments-scroll{padding-bottom:calc(var(--cm-h,52px) + var(--bottom-pad,80px) + 12px);}'
@@ -2755,7 +2755,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.5',
+    version: '0.9.6',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
