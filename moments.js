@@ -126,9 +126,14 @@
 
   // ========== 调试日志面板（独立于 root.innerHTML，避免被重渲染销毁）==========
   var _dbgEntries = [];
-  var _dbgPanel = null;      // 容器（挂到 body，不在 root 内）
-  var _dbgBox = null;        // 内容区
-  var _DBG_MAX = 80;
+  var _dbgPanel = null;
+  var _dbgBox = null;
+  var _dbgAutoScroll = true;
+  var _dbgDragging = false;
+  var _dbgDragStartY = 0;
+  var _dbgDragStartH = 0;
+  var _DBG_MAX = 300;
+  var _dbgCountEl = null;
   function dbgLog(tag, msg) {
     var ts = new Date();
     var time = ('0' + ts.getHours()).slice(-2) + ':' + ('0' + ts.getMinutes()).slice(-2) + ':' + ('0' + ts.getSeconds()).slice(-2) + '.' + ('00' + ts.getMilliseconds()).slice(-3);
@@ -136,7 +141,11 @@
     _dbgEntries.push(line);
     if (_dbgEntries.length > _DBG_MAX) _dbgEntries.shift();
     if (!_dbgPanel) dbgMount();
-    if (_dbgBox) _dbgBox.textContent = _dbgEntries.join('\n');
+    if (_dbgBox) {
+      _dbgBox.textContent = _dbgEntries.join('\n');
+      if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
+    }
+    if (_dbgCountEl) _dbgCountEl.textContent = '(' + _dbgEntries.length + '/' + _DBG_MAX + ')';
   }
   function dbgState() {
     return 'lpA=' + (_lpTouchActive ? 1 : 0)
@@ -145,23 +154,132 @@
       + ' sb=' + (state.sidebarOpen ? 1 : 0)
       + ' lp=' + (state.lpSheetOpen ? 1 : 0);
   }
+  function dbgElInfo(el) {
+    if (!el) return 'null';
+    var tag = el.tagName || '?';
+    var cls = el.className ? '.' + String(el.className).replace(/\s+/g, '.').slice(0, 40) : '';
+    var id = el.id ? '#' + el.id : '';
+    var act = el.getAttribute && el.getAttribute('data-action') ? '[data-action=' + el.getAttribute('data-action') + ']' : '';
+    return tag + id + cls + act;
+  }
   function dbgMount() {
     if (_dbgPanel || !document.body) return;
     var css = document.createElement('style');
-    css.textContent = '.moments-dbg-panel{position:fixed;right:4px;bottom:4px;width:260px;max-height:160px;background:rgba(0,0,0,0.82);color:#0f0;font-family:Menlo,Consolas,monospace;font-size:9px;line-height:1.35;z-index:99999;border-radius:6px;overflow:hidden;display:flex;flex-direction:column;border:1px solid #333;}'
-      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:2px 6px;background:#222;color:#eee;font-size:9px;}'
-      + '.moments-dgb-box{flex:1;overflow-y:auto;padding:2px 6px;white-space:pre-wrap;word-break:break-all;}'
-      + '.moments-dbg-btn{cursor:pointer;color:#5cf;padding:0 4px;font-size:9px;}';
+    css.textContent = '.moments-dbg-panel{position:fixed;right:6px;bottom:6px;width:340px;height:280px;background:rgba(0,0,0,0.88);color:#0f0;font-family:Menlo,Consolas,"Courier New",monospace;font-size:11px;line-height:1.45;z-index:999999;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;border:1px solid #0a0;box-shadow:0 4px 20px rgba(0,0,0,0.5);}'
+      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#111;color:#0f0;font-size:11px;font-weight:bold;cursor:row-resize;user-select:none;-webkit-user-select:none;border-bottom:1px solid #0a0;}'
+      + '.moments-dbg-bar-title{display:flex;align-items:center;gap:6px;}'
+      + '.moments-dbg-box{flex:1;overflow-y:auto;padding:4px 8px;white-space:pre-wrap;word-break:break-all;}'
+      + '.moments-dbg-btn{cursor:pointer;color:#0ff;padding:0 6px;font-size:11px;border:1px solid #0aa;border-radius:3px;margin:0 2px;}'
+      + '.moments-dbg-btn:hover{background:rgba(0,255,255,0.15);}'
+      + '.moments-dbg-btn.active{background:rgba(0,255,255,0.3);}'
+      + '.moments-dbg-count{color:#888;font-size:10px;margin-left:4px;font-weight:normal;}'
+      + '.moments-dbg-textarea{width:100%;height:100%;background:transparent;color:#0f0;border:none;outline:none;resize:none;font-family:inherit;font-size:inherit;line-height:inherit;}';
     document.head.appendChild(css);
     _dbgPanel = document.createElement('div');
     _dbgPanel.className = 'moments-dbg-panel';
-    _dbgPanel.innerHTML = '<div class="moments-dbg-bar"><span>Moments Debug</span><span><span class="moments-dbg-btn" id="_dbgClear">CLR</span> <span class="moments-dbg-btn" id="_dbgClose">X</span></span></div><div class="moments-dgb-box"></div>';
+    _dbgPanel.innerHTML = ''
+      + '<div class="moments-dbg-bar">'
+      + '  <div class="moments-dbg-bar-title"><span>Moments Debug</span><span class="moments-dbg-count" id="_dbgCount"></span></div>'
+      + '  <div>'
+      + '    <span class="moments-dbg-btn" id="_dbgCopy">COPY</span>'
+      + '    <span class="moments-dbg-btn active" id="_dbgAuto">AUTO</span>'
+      + '    <span class="moments-dbg-btn" id="_dbgClear">CLR</span>'
+      + '    <span class="moments-dbg-btn" id="_dbgClose">X</span>'
+      + '  </div>'
+      + '</div>'
+      + '<div class="moments-dbg-box"></div>';
     document.body.appendChild(_dbgPanel);
-    _dbgBox = _dbgPanel.querySelector('.moments-dgb-box');
-    _dbgPanel.querySelector('#_dbgClear').addEventListener('click', function (e) { e.stopPropagation(); _dbgEntries = []; if (_dbgBox) _dbgBox.textContent = ''; });
+    _dbgBox = _dbgPanel.querySelector('.moments-dbg-box');
+    _dbgCountEl = _dbgPanel.querySelector('#_dbgCount');
+    var autoBtn = _dbgPanel.querySelector('#_dbgAuto');
+    _dbgPanel.querySelector('#_dbgClear').addEventListener('click', function (e) { e.stopPropagation(); _dbgEntries.length = 0; if (_dbgBox) _dbgBox.textContent = ''; if (_dbgCountEl) _dbgCountEl.textContent = '(0/' + _DBG_MAX + ')'; });
     _dbgPanel.querySelector('#_dbgClose').addEventListener('click', function (e) { e.stopPropagation(); if (_dbgPanel) _dbgPanel.style.display = 'none'; });
+    autoBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      _dbgAutoScroll = !_dbgAutoScroll;
+      autoBtn.classList.toggle('active', _dbgAutoScroll);
+      if (_dbgAutoScroll && _dbgBox) _dbgBox.scrollTop = _dbgBox.scrollHeight;
+    });
+    _dbgPanel.querySelector('#_dbgCopy').addEventListener('click', function (e) {
+      e.stopPropagation();
+      var text = _dbgEntries.join('\n');
+      var ta = document.createElement('textarea');
+      ta.className = 'moments-dbg-textarea';
+      ta.value = text;
+      _dbgBox.innerHTML = '';
+      _dbgBox.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { document.execCommand('copy'); } catch (err) {}
+      setTimeout(function () {
+        _dbgBox.textContent = _dbgEntries.join('\n');
+        if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
+      }, 800);
+    });
+    _dbgBox.addEventListener('scroll', function () {
+      if (!_dbgBox) return;
+      var nearBottom = _dbgBox.scrollHeight - _dbgBox.scrollTop - _dbgBox.clientHeight < 20;
+      if (nearBottom !== _dbgAutoScroll) {
+        _dbgAutoScroll = nearBottom;
+        autoBtn.classList.toggle('active', _dbgAutoScroll);
+      }
+    });
     _dbgBox.textContent = _dbgEntries.join('\n');
+    if (_dbgCountEl) _dbgCountEl.textContent = '(' + _dbgEntries.length + '/' + _DBG_MAX + ')';
+
+    // 在 document 捕获阶段监听全局事件，不依赖 root
+    // 这样即使 root 上的监听器失效，也能看到事件是否真的触发
+    var globalEvts = ['touchstart', 'touchend', 'touchcancel', 'click', 'mousedown', 'mouseup'];
+    var _docLastEvt = {};
+    for (var gi = 0; gi < globalEvts.length; gi++) {
+      (function (evtName) {
+        document.addEventListener(evtName, function (e) {
+          var tgt = e.target;
+          var tinfo = dbgElInfo(tgt);
+          var inRoot = root && root.contains && root.contains(tgt);
+          var pe = '';
+          try { pe = getComputedStyle(tgt).pointerEvents; } catch (err) {}
+          var key = evtName + '|' + tinfo + '|' + (inRoot ? 1 : 0);
+          if (_docLastEvt[evtName] !== key) {
+            _docLastEvt[evtName] = key;
+            dbgLog('DOC', evtName + ' tgt=' + tinfo + ' inRoot=' + (inRoot ? 1 : 0) + ' pe=' + pe);
+          }
+        }, true);
+      })(globalEvts[gi]);
+    }
+    // touchmove 单独处理，每 200ms 最多一条，避免刷屏
+    var _docMoveTimer = null;
+    var _docMoveInfo = null;
+    document.addEventListener('touchmove', function (e) {
+      var tgt = e.target;
+      var tinfo = dbgElInfo(tgt);
+      var inRoot = root && root.contains && root.contains(tgt);
+      _docMoveInfo = { tinfo: tinfo, inRoot: inRoot };
+      if (!_docMoveTimer) {
+        _docMoveTimer = setTimeout(function () {
+          _docMoveTimer = null;
+          if (_docMoveInfo) dbgLog('DOC', 'touchmove tgt=' + _docMoveInfo.tinfo + ' inRoot=' + (_docMoveInfo.inRoot ? 1 : 0) + ' (throttled)');
+        }, 200);
+      }
+    }, true);
+
+    // 定时检测 root 健康状态
+    setInterval(function () {
+      if (!root) return;
+      var inDoc = document.body && document.body.contains(root);
+      var rpe = '';
+      try { rpe = getComputedStyle(root).pointerEvents; } catch (err) {}
+      var childCnt = root.children ? root.children.length : 0;
+      var listenerInfo = 'rootInDoc=' + (inDoc ? 1 : 0) + ' pe=' + rpe + ' children=' + childCnt + ' ' + dbgState();
+      var lastInfo = _dbgLastHealth;
+      if (lastInfo !== listenerInfo) {
+        dbgLog('HEALTH', listenerInfo);
+        _dbgLastHealth = listenerInfo;
+      }
+    }, 2000);
   }
+
+  var _dbgLastHealth = null;
 
   // ========== Store ==========
   var Store = {
@@ -2566,7 +2684,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.1',
+    version: '0.9.2',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
