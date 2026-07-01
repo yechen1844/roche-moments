@@ -1,8 +1,8 @@
 {
   "id": "roche-moments",
   "name": "朋友圈",
-  "version": "0.9.4",
-  "description": "v0.9.4：关键修复 - 所有事件移至document捕获阶段监听，彻底解决第二次打开侧边栏后点击失效问题。附带心跳检测+错误捕获+全屏覆盖诊断工具。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
+  "version": "0.9.5",
+  "description": "v0.9.5：根因修复 - 移除长按头像打开侧边栏功能(导致第二次点击失效)，改用双击标题打开。顶栏加安全区域适配。调试日志默认折叠为小按钮。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
   "author": "RocheMoments",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-moments/main/moments.js",
   "hash": "",
