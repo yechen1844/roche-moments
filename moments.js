@@ -106,7 +106,7 @@
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
     charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, lpSheetOpen: false, lpTarget: null, darkMode: false, uiPrefsOpen: false,
-    uiPrefs: { topbarH: 0, bottomPad: 80 },
+    uiPrefs: { topbarH: 36, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
     syncFormatOpen: false,
@@ -138,12 +138,7 @@
         state.subapi = r[3] || []; state.syncstate = (r[4] && typeof r[4] === 'object' && !Array.isArray(r[4])) ? r[4] : {}; state.activeSpaceId = r[5];
         state.darkMode = !!r[6];
         if (r[7] && typeof r[7] === 'object') {
-          if (r[7].topbarH != null) {
-            // 兼容旧版：旧版 topbarH 是 36-72（减44得 --topbar-pad），新版直接作为 padding 值
-            // 旧版值 >0 且 <=72 的，减去 44 转为新格式（最小 0）
-            var oldVal = parseInt(r[7].topbarH, 10);
-            state.uiPrefs.topbarH = oldVal > 0 ? Math.max(0, oldVal - 44) : 0;
-          }
+          if (r[7].topbarH != null) state.uiPrefs.topbarH = parseInt(r[7].topbarH, 10) || 0;
           if (r[7].bottomPad != null) state.uiPrefs.bottomPad = r[7].bottomPad;
         }
         if (!state.activeSpaceId && state.spaces.length) state.activeSpaceId = state.spaces[0].id;
@@ -1968,7 +1963,7 @@
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
       case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
       case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
-      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 0, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
+      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 36, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
       case 'open-notif': state.notifPanelOpen = true; Store.markAllNotifRead(); render(); break;
       case 'close-notif': state.notifPanelOpen = false; render(); break;
       case 'clear-notifs': Store.clearNotifs().then(render); break;
@@ -2296,7 +2291,7 @@
 // 顶栏 黑底白字 sticky；高度可调
 + '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px));height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px));flex-shrink:0;box-sizing:border-box;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
-+ '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;padding:8px 12px;margin:-8px -12px;}'
++ '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;padding:16px 32px;margin:-16px -32px;min-height:44px;display:flex;align-items:center;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
 // 评论态：滚动区底部额外让出输入栏高度，确保不遮挡
 + '.' + ROOT_CLASS + '.commenting .moments-scroll{padding-bottom:calc(var(--cm-h,52px) + var(--bottom-pad,80px) + 12px);}'
@@ -2533,7 +2528,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '1.0.2',
+    version: '1.0.3',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
