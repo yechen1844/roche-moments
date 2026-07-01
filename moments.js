@@ -2529,7 +2529,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.9',
+    version: '1.0.0',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2538,12 +2538,27 @@
         cachedRoche = roche;
         root = container;
         state.bootLoading = true;
-        if (!document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]')) {
-          var st = document.createElement('style');
-          st.setAttribute('data-plugin', PLUGIN_ID);
-          st.textContent = CSS;
-          document.head.appendChild(st);
+
+        // === 强制清理旧版本残留 ===
+        // 1. 删除旧调试面板 DOM
+        var oldPanels = document.querySelectorAll('.moments-dbg-panel');
+        for (var i = 0; i < oldPanels.length; i++) oldPanels[i].remove();
+        // 2. 删除旧调试 CSS
+        var oldDbgCss = document.querySelectorAll('style:not([data-plugin="' + PLUGIN_ID + '"])');
+        for (var j = 0; j < oldDbgCss.length; j++) {
+          if (oldDbgCss[j].textContent && oldDbgCss[j].textContent.indexOf('moments-dbg') !== -1) oldDbgCss[j].remove();
         }
+        // 3. 清除旧全局错误处理器
+        window.onerror = null;
+        window.onunhandledrejection = null;
+
+        // 4. 强制替换 CSS（删除旧的再插入新的，确保顶栏安全区域等样式生效）
+        var oldStyles = document.querySelectorAll('style[data-plugin="' + PLUGIN_ID + '"]');
+        for (var k = 0; k < oldStyles.length; k++) oldStyles[k].remove();
+        var st = document.createElement('style');
+        st.setAttribute('data-plugin', PLUGIN_ID);
+        st.textContent = CSS;
+        document.head.appendChild(st);
         render();
         try {
           await refreshPersonas();
