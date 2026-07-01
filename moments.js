@@ -2030,19 +2030,42 @@
   }
 
   // ========== 事件 ==========
+  // 关键修复：所有事件绑在 document 捕获阶段，不依赖 root
+  // 原因：第二次打开侧边栏后 root 上的监听器可能因 WebView bug 失效
+  // 只有当事件 target 在 root 内时才处理
+  function inRoot(el) {
+    return !!(root && el && (el === root || (root.contains && root.contains(el))));
+  }
+  function wrapInRoot(handler) {
+    return function (e) {
+      if (!inRoot(e.target)) return;
+      handler.call(root, e);
+    };
+  }
+  var _docHandlers = {};
   function bindEvents() {
-    if (!root) return;
-    root.addEventListener('click', onRootClick);
-    root.addEventListener('dblclick', onRootDblClick);
-    root.addEventListener('change', onRootChange);
-    root.addEventListener('input', onRootChange);
-    root.addEventListener('touchstart', onLpStart, { passive: false });
-    root.addEventListener('touchend', onLpEnd);
-    root.addEventListener('touchcancel', onLpEnd);
-    root.addEventListener('touchmove', onLpMove, { passive: true });
-    root.addEventListener('mousedown', onLpStart);
-    root.addEventListener('mouseup', onLpEnd);
-    root.addEventListener('mouseleave', onLpCancel);
+    if (!root || _docHandlers.bound) return;
+    _docHandlers.click = wrapInRoot(onRootClick);
+    _docHandlers.dblclick = wrapInRoot(onRootDblClick);
+    _docHandlers.change = wrapInRoot(onRootChange);
+    _docHandlers.input = wrapInRoot(onRootChange);
+    _docHandlers.touchstart = wrapInRoot(onLpStart);
+    _docHandlers.touchend = wrapInRoot(onLpEnd);
+    _docHandlers.touchcancel = wrapInRoot(onLpEnd);
+    _docHandlers.touchmove = wrapInRoot(onLpMove);
+    _docHandlers.mousedown = wrapInRoot(onLpStart);
+    _docHandlers.mouseup = wrapInRoot(onLpEnd);
+    document.addEventListener('click', _docHandlers.click, { capture: true });
+    document.addEventListener('dblclick', _docHandlers.dblclick, { capture: true });
+    document.addEventListener('change', _docHandlers.change, { capture: true });
+    document.addEventListener('input', _docHandlers.input, { capture: true });
+    document.addEventListener('touchstart', _docHandlers.touchstart, { capture: true, passive: false });
+    document.addEventListener('touchend', _docHandlers.touchend, { capture: true });
+    document.addEventListener('touchcancel', _docHandlers.touchcancel, { capture: true });
+    document.addEventListener('touchmove', _docHandlers.touchmove, { capture: true, passive: true });
+    document.addEventListener('mousedown', _docHandlers.mousedown, { capture: true });
+    document.addEventListener('mouseup', _docHandlers.mouseup, { capture: true });
+    _docHandlers.bound = true;
   }
   function closestEl(el, attr, val) {
     while (el && el !== root) {
@@ -2719,7 +2742,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.3',
+    version: '0.9.4',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2764,17 +2787,18 @@
             }
           }
         } catch (e) { console.warn('[Moments] auto sync failed', e); }
-        if (root) {
-          root.removeEventListener('click', onRootClick);
-          root.removeEventListener('dblclick', onRootDblClick);
-          root.removeEventListener('change', onRootChange);
-          root.removeEventListener('touchstart', onLpStart);
-          root.removeEventListener('touchend', onLpEnd);
-          root.removeEventListener('touchcancel', onLpEnd);
-          root.removeEventListener('touchmove', onLpMove);
-          root.removeEventListener('mousedown', onLpStart);
-          root.removeEventListener('mouseup', onLpEnd);
-          root.removeEventListener('mouseleave', onLpCancel);
+        if (_docHandlers && _docHandlers.bound) {
+          document.removeEventListener('click', _docHandlers.click, { capture: true });
+          document.removeEventListener('dblclick', _docHandlers.dblclick, { capture: true });
+          document.removeEventListener('change', _docHandlers.change, { capture: true });
+          document.removeEventListener('input', _docHandlers.input, { capture: true });
+          document.removeEventListener('touchstart', _docHandlers.touchstart, { capture: true });
+          document.removeEventListener('touchend', _docHandlers.touchend, { capture: true });
+          document.removeEventListener('touchcancel', _docHandlers.touchcancel, { capture: true });
+          document.removeEventListener('touchmove', _docHandlers.touchmove, { capture: true });
+          document.removeEventListener('mousedown', _docHandlers.mousedown, { capture: true });
+          document.removeEventListener('mouseup', _docHandlers.mouseup, { capture: true });
+          _docHandlers.bound = false;
         }
         pendingImages = [];
         if (container) container.replaceChildren();
