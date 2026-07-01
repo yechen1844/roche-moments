@@ -106,7 +106,7 @@
     sidebarOpen: false, postModalOpen: false, notifPanelOpen: false,
     subjectSheetOpen: false, memMountCharId: null, subApiPanelOpen: false,
     charListOpen: false, commentTarget: null, editPostId: null, editModalOpen: false, lpSheetOpen: false, lpTarget: null, darkMode: false, uiPrefsOpen: false,
-    uiPrefs: { topbarH: 72, bottomPad: 80 },
+    uiPrefs: { topbarH: 0, bottomPad: 80 },
     moodPromptsOpen: false, npcModalCharId: null, npcSuggestions: [], npcLoading: false,
     relationNetOpen: false,
     syncFormatOpen: false,
@@ -138,7 +138,12 @@
         state.subapi = r[3] || []; state.syncstate = (r[4] && typeof r[4] === 'object' && !Array.isArray(r[4])) ? r[4] : {}; state.activeSpaceId = r[5];
         state.darkMode = !!r[6];
         if (r[7] && typeof r[7] === 'object') {
-          if (r[7].topbarH != null) state.uiPrefs.topbarH = r[7].topbarH;
+          if (r[7].topbarH != null) {
+            // 兼容旧版：旧版 topbarH 是 36-72（减44得 --topbar-pad），新版直接作为 padding 值
+            // 旧版值 >0 且 <=72 的，减去 44 转为新格式（最小 0）
+            var oldVal = parseInt(r[7].topbarH, 10);
+            state.uiPrefs.topbarH = oldVal > 0 ? Math.max(0, oldVal - 44) : 0;
+          }
           if (r[7].bottomPad != null) state.uiPrefs.bottomPad = r[7].bottomPad;
         }
         if (!state.activeSpaceId && state.spaces.length) state.activeSpaceId = state.spaces[0].id;
@@ -1219,7 +1224,7 @@
     var savedScrolls = state._suppressScrollRestore ? {} : captureScrolls();
     var space = Store.getActiveSpace();
     var rootCls = ROOT_CLASS + (state.darkMode ? ' dark' : '') + (state.commentTarget ? ' commenting' : '');
-    var html = '<div class="' + rootCls + '" style="--topbar-pad:' + Math.max(0, (state.uiPrefs.topbarH || 44) - 44) + 'px;--bottom-pad:' + (state.uiPrefs.bottomPad || 80) + 'px;">';
+    var html = '<div class="' + rootCls + '" style="--topbar-pad:' + Math.max(0, state.uiPrefs.topbarH || 0) + 'px;--bottom-pad:' + (state.uiPrefs.bottomPad || 80) + 'px;">';
     // 滚动区：顶栏 sticky + 封面 + feed
     html += '<div class="moments-scroll">';
     html += renderTopbar(space);
@@ -1679,8 +1684,8 @@
     var html = '<div class="moments-modal-mask" data-action="close-uiprefs"><div class="moments-modal" data-stop="1"><div class="moments-modal-hd"><div class="moments-modal-title">界面尺寸调整</div><div class="moments-modal-x" data-action="close-uiprefs">' + ICON.close + '</div></div><div class="moments-modal-bd">';
     html += '<div class="moments-hint">拖动滑块实时预览，设置自动保存，所有屏幕尺寸通用。</div>';
     html += '<div class="moments-div"></div>';
-    html += '<div class="moments-row"><div class="moments-row-label">顶栏高度 <span class="moments-range-val" id="uipref-tb-val">' + tb + 'px</span></div>';
-    html += '<input class="moments-range" type="range" min="44" max="120" step="1" value="' + tb + '" data-field="uipref-topbar"></div>';
+    html += '<div class="moments-row"><div class="moments-row-label">顶栏安全区域 <span class="moments-range-val" id="uipref-tb-val">' + tb + 'px</span></div>';
+    html += '<input class="moments-range" type="range" min="0" max="80" step="1" value="' + tb + '" data-field="uipref-topbar"></div>';
     html += '<div class="moments-div"></div>';
     html += '<div class="moments-row"><div class="moments-row-label">底部安全边距 <span class="moments-range-val" id="uipref-bp-val">' + bp + 'px</span></div>';
     html += '<div class="moments-hint">为评论输入栏预留空间，防止遮挡底部朋友圈内容；不同屏幕均生效。</div>';
@@ -1908,8 +1913,7 @@
       var rootEl = root.querySelector('.' + ROOT_CLASS);
       if (field === 'uipref-topbar') {
         state.uiPrefs.topbarH = val;
-        var padVal = Math.max(0, val - 44);
-        if (rootEl) rootEl.style.setProperty('--topbar-pad', padVal + 'px');
+        if (rootEl) rootEl.style.setProperty('--topbar-pad', val + 'px');
         var tbValEl = $('#uipref-tb-val', root); if (tbValEl) tbValEl.textContent = val + 'px';
       } else {
         state.uiPrefs.bottomPad = val;
@@ -1964,7 +1968,7 @@
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
       case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
       case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
-      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 72, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
+      case 'reset-uiprefs': { state.uiPrefs = { topbarH: 0, bottomPad: 80 }; Store.saveUiPrefs().then(render); break; }
       case 'open-notif': state.notifPanelOpen = true; Store.markAllNotifRead(); render(); break;
       case 'close-notif': state.notifPanelOpen = false; render(); break;
       case 'clear-notifs': Store.clearNotifs().then(render); break;
