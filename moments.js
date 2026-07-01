@@ -1,7 +1,7 @@
 /**
- * Roche 朋友圈插件 v0.8.4
+ * Roche 朋友圈插件 v0.8.5
  * 完全拟真微信朋友圈的沉浸式模拟
- * v0.8.4: 顶栏适配改为增加顶部空白区域（而非拉伸变形）；长按封面头像可打开侧边栏（短按保留切换主体）；修复长按/双击导致点击事件全部失效的交互阻塞 bug（触摸设备双触发+_lpFired 竞态）
+ * v0.8.5: 修复长按打开侧边栏/操作菜单后所有点击事件失效的 bug（合成事件竞态导致 _lpFired 循环卡死）
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -1771,6 +1771,8 @@
     // 触摸设备：touchstart 先于 mousedown，防止双触发
     if (e.type === 'touchstart') _lpTouchActive = true;
     if (e.type === 'mousedown' && _lpTouchActive) return;
+    // 操作菜单/侧边栏已打开时，不再启动新长按定时器（防止合成事件竞态）
+    if (state.lpSheetOpen || state.sidebarOpen) return;
     // 清除旧定时器（防止残留 timer 干扰）
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     _lpFired = false;
@@ -1796,7 +1798,6 @@
         state.lpSheetOpen = true;
         render();
       }
-      if (e.cancelable) e.preventDefault();
     }, LP_DELAY);
   }
 
@@ -2509,7 +2510,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.4',
+    version: '0.8.5',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
