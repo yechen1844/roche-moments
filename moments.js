@@ -1,7 +1,7 @@
 /**
  * Roche 朋友圈插件 v0.8.5
  * 完全拟真微信朋友圈的沉浸式模拟
- * v0.8.5: 修复长按打开侧边栏/操作菜单后所有点击事件失效的 bug（用时间戳 _lpFireTime 替代布尔 _lpFired，消除 setTimeout 重置竞态）
+ * v0.8.5: 修复反复长按后点击事件失效的 bug（用 _lpBlockClicks 布尔 + render 驱动单一定时器，消除竞态）
  * v0.8.1: 关系网支持 user↔char 有向关系（user 可作为关系端点，下拉可选 user）；新增"记忆注入格式"自定义模板（变量 {now}/{userHandle}/{userName}/{charName}/{charHandle} 等，[label] 区分子类型，留空=内置默认，覆盖全部注入内容含 user 双名字认知行/开头/导语/5分类/结尾）
  * v0.8.0: 召唤评论实时注入短期记忆（无需关闭插件）；reply-to 白名单校验防幻觉前缀；unmount 多 char 注入持久化修复（syncstate 默认值+await 链）；氛围提示词标题显示 user 名；图形化蛛网关系网（user/char 身份设定+char 间有向关系+SVG 可视化+自动注入提示词）
  * v0.7.2: 轨迹记录补全被评论朋友圈内容（char 知道评论了哪条）；无新行为时不再注入空轨迹记录；拆分主动发圈(postEnabled)与参与评论(commentEnabled)双开关
@@ -116,8 +116,8 @@
   };
   var pendingImages = [];
   var _lpTimer = null;
-  var _lpFireTime = 0;
-  var _lpClearTimer = null;
+  var _lpBlockClicks = false;
+  var _lpBlockTimer = null;
   var _lpStartX = 0;
   var _lpStartY = 0;
   var _lpTouchActive = false;
@@ -1242,10 +1242,10 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
-    // 长按后自动清除 _lpFireTime，不依赖合成 click 事件（render 后 DOM 重建可能导致合成事件丢失）
-    if (_lpClearTimer) { clearTimeout(_lpClearTimer); _lpClearTimer = null; }
-    if (_lpFireTime > 0) {
-      _lpClearTimer = setTimeout(function () { _lpFireTime = 0; _lpClearTimer = null; }, 500);
+    // 长按后 500ms 自动清除点击拦截，re-render 时重置计时器
+    if (_lpBlockTimer) { clearTimeout(_lpBlockTimer); _lpBlockTimer = null; }
+    if (_lpBlockClicks) {
+      _lpBlockTimer = setTimeout(function () { _lpBlockClicks = false; _lpBlockTimer = null; }, 500);
     }
     // 恢复滚动位置
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
@@ -1781,7 +1781,7 @@
     if (state.lpSheetOpen || state.sidebarOpen) return;
     // 清除旧定时器（防止残留 timer 干扰）
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
-    _lpFireTime = 0;
+    _lpBlockClicks = false;
     var touch = e.touches ? e.touches[0] : e;
     _lpStartX = touch.clientX;
     _lpStartY = touch.clientY;
@@ -1789,7 +1789,7 @@
     var lpInfo = findLpAnchor(target);
     if (!lpInfo) return;
     _lpTimer = setTimeout(function () {
-      _lpFireTime = Date.now();
+      _lpBlockClicks = true;
       _lpTimer = null;
       if (lpInfo.anchor) {
         lpInfo.anchor.classList.add('lp-active');
@@ -1858,8 +1858,7 @@
     if (dbl === 'open-sidebar') { state.sidebarOpen = true; render(); }
   }
   function onRootClick(e) {
-    if (_lpFireTime > 0 && Date.now() - _lpFireTime < 600) { _lpFireTime = 0; e.stopPropagation(); e.preventDefault(); return; }
-    _lpFireTime = 0;
+    if (_lpBlockClicks) { e.stopPropagation(); e.preventDefault(); return; }
     var t = e.target;
     // 文字图点击：直接 toggle class，不 render
     var textToggle = closestEl(t, 'data-action', 'toggle-text');
@@ -2568,7 +2567,7 @@
           root.removeEventListener('mousedown', onLpStart);
           root.removeEventListener('mouseup', onLpEnd);
           root.removeEventListener('mouseleave', onLpCancel);
-          if (_lpClearTimer) { clearTimeout(_lpClearTimer); _lpClearTimer = null; }
+          if (_lpBlockTimer) { clearTimeout(_lpBlockTimer); _lpBlockTimer = null; }
         }
         pendingImages = [];
         if (container) container.replaceChildren();
