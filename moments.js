@@ -117,6 +117,7 @@
   var pendingImages = [];
   var _lpTimer = null;
   var _lpFireTime = 0;
+  var _lpClearTimer = null;
   var _lpStartX = 0;
   var _lpStartY = 0;
   var _lpTouchActive = false;
@@ -1241,6 +1242,11 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
+    // 长按后自动清除 _lpFireTime，不依赖合成 click 事件（render 后 DOM 重建可能导致合成事件丢失）
+    if (_lpClearTimer) { clearTimeout(_lpClearTimer); _lpClearTimer = null; }
+    if (_lpFireTime > 0) {
+      _lpClearTimer = setTimeout(function () { _lpFireTime = 0; _lpClearTimer = null; }, 500);
+    }
     // 恢复滚动位置
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
@@ -2562,6 +2568,7 @@
           root.removeEventListener('mousedown', onLpStart);
           root.removeEventListener('mouseup', onLpEnd);
           root.removeEventListener('mouseleave', onLpCancel);
+          if (_lpClearTimer) { clearTimeout(_lpClearTimer); _lpClearTimer = null; }
         }
         pendingImages = [];
         if (container) container.replaceChildren();
