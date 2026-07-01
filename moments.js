@@ -119,6 +119,8 @@
   var _lpStartX = 0;
   var _lpStartY = 0;
   var _lpTouchActive = false;
+  // 上一次 render() 完成的时间戳，用于阻止长按后立即产生的合成 click 误关刚打开的侧边栏/操作菜单
+  var _lastRenderTs = 0;
 
   // ========== Store ==========
   var Store = {
@@ -1240,14 +1242,9 @@
     if (state.commentTarget) html += renderCommentInput();
     html += '</div>';
     root.innerHTML = html;
-    // 让遮罩在 150ms 内不可点击，防止长按后的合成 click 误关刚打开的侧边栏/操作菜单
-    (function () {
-      var masks = root.querySelectorAll('.moments-mask, .moments-modal-mask');
-      for (var mi = 0; mi < masks.length; mi++) masks[mi].style.pointerEvents = 'none';
-      setTimeout(function () {
-        for (var mj = 0; mj < masks.length; mj++) masks[mj].style.pointerEvents = '';
-      }, 150);
-    })();
+    // 记录本次 render 完成的时间戳，用于在 close-* 动作中作为守卫判断
+    // 防止长按触发 render 后立即产生的合成 click 误关刚打开的侧边栏/操作菜单
+    _lastRenderTs = Date.now();
     // 恢复滚动位置
     if (!state._suppressScrollRestore) restoreScrolls(savedScrolls);
     state._suppressScrollRestore = false;
@@ -1801,7 +1798,10 @@
   }
 
   function onLpEnd(e) {
-    if (e && e.type === 'touchend') _lpTouchActive = false;
+    // touchend 与 touchcancel 都需要清除触摸态
+    // 关键修复：iOS 上侧边栏的 overflow-y:auto + -webkit-overflow-scrolling:touch
+    // 在滚动开始时会把 touchend 转为 touchcancel，若不在此清除，_lpTouchActive 会卡死为 true
+    if (e && (e.type === 'touchend' || e.type === 'touchcancel')) _lpTouchActive = false;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
   }
 
@@ -1828,6 +1828,7 @@
     root.addEventListener('input', onRootChange);
     root.addEventListener('touchstart', onLpStart, { passive: false });
     root.addEventListener('touchend', onLpEnd);
+    root.addEventListener('touchcancel', onLpEnd);
     root.addEventListener('touchmove', onLpMove, { passive: true });
     root.addEventListener('mousedown', onLpStart);
     root.addEventListener('mouseup', onLpEnd);
@@ -1937,7 +1938,12 @@
     switch (act) {
       case 'back': if (cachedRoche && cachedRoche.ui) cachedRoche.ui.closeApp(); break;
       case 'open-sidebar': state.sidebarOpen = true; render(); break;
-      case 'close-sidebar': state.sidebarOpen = false; render(); break;
+      case 'close-sidebar': {
+        // 守卫：长按触发的 render 完成后 200ms 内产生的合成 click 不能关闭侧边栏
+        // 这样可避免手指抬起后浏览器合成的 click 误关刚打开的侧边栏
+        if (Date.now() - _lastRenderTs < 200) return;
+        state.sidebarOpen = false; render(); break;
+      }
       case 'toggle-dark': { state.darkMode = !state.darkMode; Store.saveDark().then(render); break; }
       case 'open-uiprefs': state.uiPrefsOpen = true; state.sidebarOpen = false; render(); break;
       case 'close-uiprefs': state.uiPrefsOpen = false; render(); break;
@@ -1951,7 +1957,11 @@
       case 'open-post-modal': pendingImages = []; state.postModalOpen = true; render(); break;
       case 'close-post-modal': state.postModalOpen = false; pendingImages = []; render(); break;
       case 'close-edit-modal': state.editModalOpen = false; state.editPostId = null; pendingImages = []; render(); break;
-      case 'close-lp-sheet': state.lpSheetOpen = false; state.lpTarget = null; render(); break;
+      case 'close-lp-sheet': {
+        // 守卫：长按触发的 render 完成后 200ms 内产生的合成 click 不能关闭操作菜单
+        if (Date.now() - _lastRenderTs < 200) return;
+        state.lpSheetOpen = false; state.lpTarget = null; render(); break;
+      }
       case 'open-subapi': state.subApiPanelOpen = true; render(); break;
       case 'close-subapi': state.subApiPanelOpen = false; render(); break;
       case 'open-char-list': state.charListOpen = true; render(); break;
@@ -2506,7 +2516,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.8.8',
+    version: '0.8.9',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2555,6 +2565,7 @@
           root.removeEventListener('change', onRootChange);
           root.removeEventListener('touchstart', onLpStart);
           root.removeEventListener('touchend', onLpEnd);
+          root.removeEventListener('touchcancel', onLpEnd);
           root.removeEventListener('touchmove', onLpMove);
           root.removeEventListener('mousedown', onLpStart);
           root.removeEventListener('mouseup', onLpEnd);
