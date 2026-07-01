@@ -1,8 +1,8 @@
 {
   "id": "roche-moments",
   "name": "朋友圈",
-  "version": "0.8.6",
-  "description": "v0.8.6：彻底修复反复长按后全界面点击失效 bug（root class + 2s 强制超时）。v0.8.4：顶栏适配优化、长按封面头像开侧边栏。v0.8.3：长按朋友圈/评论弹出操作菜单。支持user人设绑定多char、char主动发朋友圈、AI评论互动、记忆挂载、双模式记忆同步。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
+  "version": "0.8.7",
+  "description": "v0.8.7：彻底重写长按机制（document 捕获一次性吞 click，无全局标志）。v0.8.4：顶栏适配优化、长按封面头像开侧边栏。v0.8.3：长按朋友圈/评论弹出操作菜单。支持user人设绑定多char、char主动发朋友圈、AI评论互动、记忆挂载、双模式记忆同步。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
   "author": "RocheMoments",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-moments/main/moments.js",
   "hash": "",
