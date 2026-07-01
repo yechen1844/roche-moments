@@ -134,6 +134,9 @@
   var _dbgDragStartH = 0;
   var _DBG_MAX = 300;
   var _dbgCountEl = null;
+  var _dbgLastHealth = null;
+  var _dbgHeartbeatCount = 0;
+  var _dbgLastTopEls = null;
   function dbgLog(tag, msg) {
     var ts = new Date();
     var time = ('0' + ts.getHours()).slice(-2) + ':' + ('0' + ts.getMinutes()).slice(-2) + ':' + ('0' + ts.getSeconds()).slice(-2) + '.' + ('00' + ts.getMilliseconds()).slice(-3);
@@ -263,7 +266,13 @@
       }
     }, true);
 
-    // 定时检测 root 健康状态
+    // JS 心跳检测（只要 JS 活着就每秒跳一次）
+    setInterval(function () {
+      _dbgHeartbeatCount++;
+      dbgLog('HEART', 'tick=' + _dbgHeartbeatCount + ' ' + dbgState());
+    }, 1000);
+
+    // 定时检测 root 健康状态 + 全屏覆盖元素检测
     setInterval(function () {
       if (!root) return;
       var inDoc = document.body && document.body.contains(root);
@@ -276,10 +285,36 @@
         dbgLog('HEALTH', listenerInfo);
         _dbgLastHealth = listenerInfo;
       }
+      // 检测是否有全屏覆盖元素（中心和四角取点）
+      var W = window.innerWidth, H = window.innerHeight;
+      var pts = [[W/2, H/2], [10, 10], [W-10, 10], [10, H-10], [W-10, H-10]];
+      var topEls = [];
+      for (var pi = 0; pi < pts.length; pi++) {
+        try {
+          var el = document.elementFromPoint(pts[pi][0], pts[pi][1]);
+          if (el) topEls.push(dbgElInfo(el));
+        } catch (e) {}
+      }
+      var topInfo = topEls.join(' | ');
+      if (_dbgLastTopEls !== topInfo) {
+        dbgLog('TOP_ELS', topInfo);
+        _dbgLastTopEls = topInfo;
+      }
     }, 2000);
   }
 
-  var _dbgLastHealth = null;
+  // 全局错误捕获
+  var _dbgOrigOnError = window.onerror;
+  window.onerror = function (msg, url, line, col, err) {
+    dbgLog('ERROR', msg + ' @' + line + ':' + col + (err && err.stack ? '\n' + err.stack : ''));
+    if (_dbgOrigOnError) return _dbgOrigOnError.apply(this, arguments);
+    return false;
+  };
+  var _dbgOrigOnRej = window.onunhandledrejection;
+  window.onunhandledrejection = function (e) {
+    dbgLog('UNHANDLED_REJ', String(e.reason));
+    if (_dbgOrigOnRej) return _dbgOrigOnRej.apply(this, arguments);
+  };
 
   // ========== Store ==========
   var Store = {
@@ -2684,7 +2719,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.2',
+    version: '0.9.3',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
