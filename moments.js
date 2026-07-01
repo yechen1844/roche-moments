@@ -124,6 +124,45 @@
   // 导致安卓 WebView 不再合成 click 事件，后续所有点击失效（但滑动不受影响）
   var _pendingLpAction = null;
 
+  // ========== 调试日志面板（独立于 root.innerHTML，避免被重渲染销毁）==========
+  var _dbgEntries = [];
+  var _dbgPanel = null;      // 容器（挂到 body，不在 root 内）
+  var _dbgBox = null;        // 内容区
+  var _DBG_MAX = 80;
+  function dbgLog(tag, msg) {
+    var ts = new Date();
+    var time = ('0' + ts.getHours()).slice(-2) + ':' + ('0' + ts.getMinutes()).slice(-2) + ':' + ('0' + ts.getSeconds()).slice(-2) + '.' + ('00' + ts.getMilliseconds()).slice(-3);
+    var line = '[' + time + '] ' + tag + ': ' + msg;
+    _dbgEntries.push(line);
+    if (_dbgEntries.length > _DBG_MAX) _dbgEntries.shift();
+    if (!_dbgPanel) dbgMount();
+    if (_dbgBox) _dbgBox.textContent = _dbgEntries.join('\n');
+  }
+  function dbgState() {
+    return 'lpA=' + (_lpTouchActive ? 1 : 0)
+      + ' tmr=' + (_lpTimer ? 1 : 0)
+      + ' pend=' + (_pendingLpAction ? 1 : 0)
+      + ' sb=' + (state.sidebarOpen ? 1 : 0)
+      + ' lp=' + (state.lpSheetOpen ? 1 : 0);
+  }
+  function dbgMount() {
+    if (_dbgPanel || !document.body) return;
+    var css = document.createElement('style');
+    css.textContent = '.moments-dbg-panel{position:fixed;right:4px;bottom:4px;width:260px;max-height:160px;background:rgba(0,0,0,0.82);color:#0f0;font-family:Menlo,Consolas,monospace;font-size:9px;line-height:1.35;z-index:99999;border-radius:6px;overflow:hidden;display:flex;flex-direction:column;border:1px solid #333;}'
+      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:2px 6px;background:#222;color:#eee;font-size:9px;}'
+      + '.moments-dgb-box{flex:1;overflow-y:auto;padding:2px 6px;white-space:pre-wrap;word-break:break-all;}'
+      + '.moments-dbg-btn{cursor:pointer;color:#5cf;padding:0 4px;font-size:9px;}';
+    document.head.appendChild(css);
+    _dbgPanel = document.createElement('div');
+    _dbgPanel.className = 'moments-dbg-panel';
+    _dbgPanel.innerHTML = '<div class="moments-dbg-bar"><span>Moments Debug</span><span><span class="moments-dbg-btn" id="_dbgClear">CLR</span> <span class="moments-dbg-btn" id="_dbgClose">X</span></span></div><div class="moments-dgb-box"></div>';
+    document.body.appendChild(_dbgPanel);
+    _dbgBox = _dbgPanel.querySelector('.moments-dgb-box');
+    _dbgPanel.querySelector('#_dbgClear').addEventListener('click', function (e) { e.stopPropagation(); _dbgEntries = []; if (_dbgBox) _dbgBox.textContent = ''; });
+    _dbgPanel.querySelector('#_dbgClose').addEventListener('click', function (e) { e.stopPropagation(); if (_dbgPanel) _dbgPanel.style.display = 'none'; });
+    _dbgBox.textContent = _dbgEntries.join('\n');
+  }
+
   // ========== Store ==========
   var Store = {
     _get: function (k, d) { return cachedRoche.storage.get(k).then(function (v) { return v == null ? d : v; }); },
@@ -1211,6 +1250,7 @@
   }
   function render() {
     if (!root) return;
+    dbgLog('RENDER', 'sb=' + (state.sidebarOpen ? 1 : 0) + ' lp=' + (state.lpSheetOpen ? 1 : 0) + ' pend=' + (_pendingLpAction ? 1 : 0));
     if (state.bootLoading) {
       root.innerHTML = '<div class="' + ROOT_CLASS + '"><div class="moments-boot"><div class="moments-spin">' + WINDMILL_SVG + '</div><div class="moments-boot-text">加载中...</div></div></div>';
       return;
@@ -1771,9 +1811,10 @@
   }
 
   function onLpStart(e) {
+    dbgLog('LPSTART', e.type + ' ' + dbgState());
     if (e.type === 'touchstart') _lpTouchActive = true;
-    if (e.type === 'mousedown' && _lpTouchActive) return;
-    if (state.lpSheetOpen || state.sidebarOpen) return;
+    if (e.type === 'mousedown' && _lpTouchActive) { dbgLog('LPSTART', 'mousedown skipped (lpTouchActive)'); return; }
+    if (state.lpSheetOpen || state.sidebarOpen) { dbgLog('LPSTART', 'skip (already open)'); return; }
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     var touch = e.touches ? e.touches[0] : e;
     _lpStartX = touch.clientX;
@@ -1782,6 +1823,7 @@
     if (!lpInfo) return;
     _lpTimer = setTimeout(function () {
       _lpTimer = null;
+      dbgLog('LPTIMER', 'fired type=' + lpInfo.type + ' ' + dbgState());
       if (lpInfo.anchor) {
         lpInfo.anchor.classList.add('lp-active');
         setTimeout(function () { if (lpInfo.anchor) lpInfo.anchor.classList.remove('lp-active'); }, 200);
@@ -1799,6 +1841,7 @@
   }
 
   function onLpEnd(e) {
+    dbgLog('LPEND', e.type + ' ' + dbgState());
     // touchend 与 touchcancel 都需要清除触摸态
     if (e && (e.type === 'touchend' || e.type === 'touchcancel')) _lpTouchActive = false;
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
@@ -1806,6 +1849,7 @@
     if (_pendingLpAction) {
       var action = _pendingLpAction;
       _pendingLpAction = null;
+      dbgLog('LPEND', 'exec pending action');
       action();
     }
   }
@@ -1820,12 +1864,14 @@
     }
   }
 
-  function onLpCancel() {
+  function onLpCancel(e) {
+    dbgLog('LPCANCEL', (e ? e.type : '?') + ' ' + dbgState());
     if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
     // touchcancel 时也清除暂存的操作，避免 render 被丢弃
     if (_pendingLpAction) {
       var action = _pendingLpAction;
       _pendingLpAction = null;
+      dbgLog('LPCANCEL', 'exec pending action');
       action();
     }
   }
@@ -1864,6 +1910,7 @@
   }
   function onRootClick(e) {
     var t = e.target;
+    dbgLog('CLICK', 'target=' + (t.tagName + (t.className ? '.' + String(t.className).slice(0, 30) : '')) + ' ' + dbgState());
     // 文字图点击：直接 toggle class，不 render
     var textToggle = closestEl(t, 'data-action', 'toggle-text');
     if (textToggle) { textToggle.classList.toggle('revealed'); return; }
@@ -1946,6 +1993,7 @@
 
   function handleAction(act, t, e) {
     var space = Store.getActiveSpace();
+    dbgLog('ACTION', act + ' ' + dbgState());
     switch (act) {
       case 'back': if (cachedRoche && cachedRoche.ui) cachedRoche.ui.closeApp(); break;
       case 'open-sidebar': state.sidebarOpen = true; render(); break;
@@ -2518,7 +2566,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.0',
+    version: '0.9.1',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2527,6 +2575,8 @@
         cachedRoche = roche;
         root = container;
         state.bootLoading = true;
+        dbgMount();
+        dbgLog('MOUNT', 'plugin mount start');
         if (!document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]')) {
           var st = document.createElement('style');
           st.setAttribute('data-plugin', PLUGIN_ID);
