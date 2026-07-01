@@ -1,8 +1,8 @@
 {
   "id": "roche-moments",
   "name": "朋友圈",
-  "version": "1.0.1",
-  "description": "v1.0.1：顶栏安全区域从72px减至36px。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
+  "version": "1.0.2",
+  "description": "v1.0.2：顶栏安全区域改为完全由侧边栏界面尺寸调整滑块控制(44-120px)，去掉固定36px，默认72px。用户可自行缩小或放大顶栏高度。支持user人设绑定多char、AI评论互动、记忆挂载。安装后请把 entry 改成你自己的 GitHub Raw 链接。",
   "author": "RocheMoments",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-moments/main/moments.js",
   "hash": "",
