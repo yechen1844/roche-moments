@@ -169,7 +169,11 @@
     if (_dbgPanel || !document.body) return;
     var css = document.createElement('style');
     css.textContent = '.moments-dbg-panel{position:fixed;right:6px;bottom:6px;width:340px;height:280px;background:rgba(0,0,0,0.88);color:#0f0;font-family:Menlo,Consolas,"Courier New",monospace;font-size:11px;line-height:1.45;z-index:999999;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;border:1px solid #0a0;box-shadow:0 4px 20px rgba(0,0,0,0.5);}'
-      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#111;color:#0f0;font-size:11px;font-weight:bold;cursor:row-resize;user-select:none;-webkit-user-select:none;border-bottom:1px solid #0a0;}'
+      + '.moments-dbg-panel.collapsed{width:auto;height:auto;border-radius:14px;border:1px solid #333;background:rgba(0,0,0,0.6);}'
+      + '.moments-dbg-panel.collapsed .moments-dbg-bar,.moments-dbg-panel.collapsed .moments-dbg-box{display:none;}'
+      + '.moments-dbg-fab{display:none;cursor:pointer;width:28px;height:28px;border-radius:14px;background:rgba(0,0,0,0.6);color:#0a0;font-size:14px;font-weight:bold;text-align:center;line-height:28px;border:1px solid #333;z-index:999999;}'
+      + '.moments-dbg-panel.collapsed .moments-dbg-fab{display:block;}'
+      + '.moments-dbg-bar{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#111;color:#0f0;font-size:11px;font-weight:bold;cursor:default;user-select:none;-webkit-user-select:none;border-bottom:1px solid #0a0;}'
       + '.moments-dbg-bar-title{display:flex;align-items:center;gap:6px;}'
       + '.moments-dbg-box{flex:1;overflow-y:auto;padding:4px 8px;white-space:pre-wrap;word-break:break-all;}'
       + '.moments-dbg-btn{cursor:pointer;color:#0ff;padding:0 6px;font-size:11px;border:1px solid #0aa;border-radius:3px;margin:0 2px;}'
@@ -179,15 +183,16 @@
       + '.moments-dbg-textarea{width:100%;height:100%;background:transparent;color:#0f0;border:none;outline:none;resize:none;font-family:inherit;font-size:inherit;line-height:inherit;}';
     document.head.appendChild(css);
     _dbgPanel = document.createElement('div');
-    _dbgPanel.className = 'moments-dbg-panel';
+    _dbgPanel.className = 'moments-dbg-panel collapsed';
     _dbgPanel.innerHTML = ''
+      + '<div class="moments-dbg-fab" id="_dbgFab">D</div>'
       + '<div class="moments-dbg-bar">'
       + '  <div class="moments-dbg-bar-title"><span>Moments Debug</span><span class="moments-dbg-count" id="_dbgCount"></span></div>'
       + '  <div>'
       + '    <span class="moments-dbg-btn" id="_dbgCopy">COPY</span>'
       + '    <span class="moments-dbg-btn active" id="_dbgAuto">AUTO</span>'
       + '    <span class="moments-dbg-btn" id="_dbgClear">CLR</span>'
-      + '    <span class="moments-dbg-btn" id="_dbgClose">X</span>'
+      + '    <span class="moments-dbg-btn" id="_dbgCollapse">-</span>'
       + '  </div>'
       + '</div>'
       + '<div class="moments-dbg-box"></div>';
@@ -195,8 +200,18 @@
     _dbgBox = _dbgPanel.querySelector('.moments-dbg-box');
     _dbgCountEl = _dbgPanel.querySelector('#_dbgCount');
     var autoBtn = _dbgPanel.querySelector('#_dbgAuto');
+    // FAB 点击展开
+    _dbgPanel.querySelector('#_dbgFab').addEventListener('click', function (e) {
+      e.stopPropagation();
+      _dbgPanel.classList.remove('collapsed');
+      if (_dbgBox) {
+        _dbgBox.textContent = _dbgEntries.join('\n');
+        if (_dbgAutoScroll) _dbgBox.scrollTop = _dbgBox.scrollHeight;
+      }
+    });
+    // 折叠按钮
+    _dbgPanel.querySelector('#_dbgCollapse').addEventListener('click', function (e) { e.stopPropagation(); _dbgPanel.classList.add('collapsed'); });
     _dbgPanel.querySelector('#_dbgClear').addEventListener('click', function (e) { e.stopPropagation(); _dbgEntries.length = 0; if (_dbgBox) _dbgBox.textContent = ''; if (_dbgCountEl) _dbgCountEl.textContent = '(0/' + _DBG_MAX + ')'; });
-    _dbgPanel.querySelector('#_dbgClose').addEventListener('click', function (e) { e.stopPropagation(); if (_dbgPanel) _dbgPanel.style.display = 'none'; });
     autoBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       _dbgAutoScroll = !_dbgAutoScroll;
@@ -1454,7 +1469,7 @@
     var unread = 0; state.notifs.forEach(function (n) { if (!n.read) unread++; });
     return '<div class="moments-topbar">' +
       '<div class="moments-tb-left" data-action="back">' + ICON.back + '</div>' +
-      '<div class="moments-tb-title" data-dbl="open-sidebar" title="双击打开设置">朋友圈</div>' +
+      '<div class="moments-tb-title" data-dbl="open-sidebar" title="双击打开侧边栏">朋友圈</div>' +
       '<div class="moments-tb-right">' +
         '<span class="moments-tb-icon" data-action="open-post-modal">' + ICON.camera + '</span>' +
         '<span class="moments-tb-icon moments-tb-bell' + (unread ? ' has-dot' : '') + '" data-action="open-notif">' + ICON.bell + (unread ? '<i class="moments-dot"></i>' : '') + '</span>' +
@@ -1942,10 +1957,8 @@
         if (el.classList && el.classList.contains('moment-avatar')) return null;
         if (el.getAttribute('data-action') === 'view-author') return null;
         if (el.classList && el.classList.contains('moment-act-pop')) return null;
-        // 封面头像长按 → 开侧边栏
-        if (el.classList && el.classList.contains('moments-cover-avatar')) {
-          return { type: 'cover-avatar', anchor: el };
-        }
+        // 封面头像长按 → 已移除（导致第二次侧边栏点击失效）
+        // 改为双击标题打开侧边栏
         // 评论锚点（优先，嵌套在帖子内）
         if (el.classList && el.classList.contains('mc')) {
           var cid = el.getAttribute('data-cid');
@@ -2503,7 +2516,7 @@
 // 滚动容器：顶栏 sticky + 封面 + feed 全在里面滚动；底部留安全边距防输入栏遮挡
 + '.' + ROOT_CLASS + ' .moments-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:var(--bottom-pad,80px);}'
 // 顶栏 黑底白字 sticky；高度可调
-+ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:var(--topbar-pad,0px);height:calc(44px + var(--topbar-pad,0px));flex-shrink:0;}'
++ '.' + ROOT_CLASS + ' .moments-topbar{position:sticky;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;background:#1F1F1F;color:#fff;padding:0 8px;padding-top:calc(env(safe-area-inset-top,0px) + var(--topbar-pad,0px));height:calc(44px + var(--topbar-pad,0px) + env(safe-area-inset-top,0px));flex-shrink:0;box-sizing:border-box;}'
 + '.' + ROOT_CLASS + ' .moments-tb-left{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;}'
 + '.' + ROOT_CLASS + ' .moments-tb-title{flex:0 0 auto;text-align:center;font-size:17px;font-weight:500;cursor:pointer;user-select:none;}'
 + '.' + ROOT_CLASS + ' .moments-tb-right{flex:1 1 0;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:2px;}'
@@ -2742,7 +2755,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.4',
+    version: '0.9.5',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
