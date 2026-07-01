@@ -244,6 +244,8 @@
     });
     _dbgBox.textContent = _dbgEntries.join('\n');
     if (_dbgCountEl) _dbgCountEl.textContent = '(' + _dbgEntries.length + '/' + _DBG_MAX + ')';
+    // 只在 root 存在时显示（朋友圈限定）
+    _dbgPanel.style.display = root ? 'flex' : 'none';
 
     // 在 document 捕获阶段监听全局事件，不依赖 root
     // 这样即使 root 上的监听器失效，也能看到事件是否真的触发
@@ -2755,7 +2757,7 @@
   window.RochePlugin.register({
     id: PLUGIN_ID,
     name: '朋友圈',
-    version: '0.9.6',
+    version: '0.9.7',
     apps: [{
       id: APP_ID,
       name: '朋友圈',
@@ -2815,6 +2817,7 @@
         }
         pendingImages = [];
         if (container) container.replaceChildren();
+        if (_dbgPanel) _dbgPanel.style.display = 'none';
         root = null;
       }
     }]
